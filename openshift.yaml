@@ -1,139 +1,355 @@
+# ===================================================================================================================
+# Analyser no OpenShift (Red Hat) — namespace de destino: pf-policia-dev (ajuste labels/namespace se for outro).
+#
+# Aplica com:  oc apply -f openshift.yaml
+# ANTES disso:
+#   1) crie as imagens (README "Build das imagens") e faça push no registry interno do cluster;
+#   2) crie o Secret com o .env da aplicação (README "Secret analiser-env"). Este arquivo NÃO
+#      carrega segredos no git — o Secret é criado por linha de comando.
+#
+# Padrões mantidos do openshift.yaml de teste que já estava funcionando:
+#  - label app: pf-policia-dev em tudo;
+#  - front em porta 8080 com Route TLS (termination edge);
+#  - banco imagem registry.redhat.io rhel9/postgresql-16 (aqui via Dockerfile.postgres + pgvector);
+#  - sem securityContext fixo: o SCC do OpenShift injeta UID arbitrário + grupo gravável nos PVCs.
+#
+# Resources antigos do teste que este arquivo SUBSTITUI (delete-os para não sobrar pod órfão):
+#   oc delete deployment nginx --ignore-not-found
+#   oc delete configmap nginx-conf --ignore-not-found
+#   oc delete route web --ignore-not-found   # recriado abaixo
+# ===================================================================================================================
 apiVersion: v1
 kind: List
 items:
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # Postgres (imagem própria: rhel9/postgresql-16 + hook que aplica db/init no primeiro boot)
+  # ---------------------------------------------------------------------------------------------------------------
   - apiVersion: v1
-    kind: ConfigMap
+    kind: PersistentVolumeClaim
     metadata:
-      name: nginx-conf
-      labels:
-        app: pf-policia-dev
-    data:
-      default.conf: |
-        server {
-          listen 8080;
-          server_name _;
+      name: postgres-data
+      labels: {app: pf-policia-dev}
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+      # storageClassName: <classe-padrao do cluster; omitido = DefaultStorageClass>
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      # NOME OBRIGATÓRIO: db_utils.DB_HOST é "postgres" (hardcoded, como no compose).
+      name: postgres
+      labels: {app: pf-policia-dev}
+    spec:
+      selector: {app: pf-policia-dev, component: postgres}
+      ports:
+        - {name: postgres, port: 5432, targetPort: 5432}
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: postgres
+      labels: {app: pf-policia-dev}
+    spec:
+      replicas: 1
+      strategy:
+        type: Recreate          # volume RWO: nunca dois pods com o mesmo PGDATA
+      selector:
+        matchLabels: {app: pf-policia-dev, component: postgres}
+      template:
+        metadata:
+          labels: {app: pf-policia-dev, component: postgres}
+        spec:
+          containers:
+            - name: postgres
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-postgres:latest
+              ports:
+                - {containerPort: 5432, name: postgres}
+              env:
+                - name: POSTGRESQL_USER
+                  valueFrom: {secretKeyRef: {name: analyser-env, key: POSTGRES_USER}}
+                - name: POSTGRESQL_PASSWORD
+                  valueFrom: {secretKeyRef: {name: analyser-env, key: POSTGRES_PASSWORD}}
+                - name: POSTGRESQL_DATABASE
+                  valueFrom: {secretKeyRef: {name: analyser-env, key: POSTGRES_DB}}
+                # Deixe folga para o PgBouncer + conexões longas da API (mesma regra do compose).
+                - name: POSTGRESQL_MAX_CONNECTIONS
+                  value: "200"
+              volumeMounts:
+                - {name: data, mountPath: /var/lib/pgsql/data}
+              readinessProbe:
+                exec:
+                  command: ["sh", "-c", "pg_isready -q"]
+                initialDelaySeconds: 10
+                periodSeconds: 5
+              resources:
+                requests: {cpu: 500m, memory: 1Gi}
+                limits: {memory: 4Gi}
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: postgres-data
 
-          location / {
-            root /usr/share/nginx/html;
-            index index.html;
-          }
+  # ---------------------------------------------------------------------------------------------------------------
+  # PgBouncer (pooler session-mode; sem Route — só a rede interna do cluster alcança)
+  # ---------------------------------------------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: pgbouncer
+      labels: {app: pf-policia-dev}
+    spec:
+      selector: {app: pf-policia-dev, component: pgbouncer}
+      ports:
+        - {name: pgbounce, port: 6432, targetPort: 6432}
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: pgbouncer
+      labels: {app: pf-policia-dev}
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: {app: pf-policia-dev, component: pgbouncer}
+      template:
+        metadata:
+          labels: {app: pf-policia-dev, component: pgbouncer}
+        spec:
+          containers:
+            - name: pgbouncer
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-pgbouncer:latest
+              ports:
+                - {containerPort: 6432, name: pgbounce}
+              env:
+                - name: POSTGRES_USER
+                  valueFrom: {secretKeyRef: {name: analyser-env, key: POSTGRES_USER}}
+                - name: POSTGRES_PASSWORD
+                  valueFrom: {secretKeyRef: {name: analyser-env, key: POSTGRES_PASSWORD}}
+                - name: POSTGRES_DB
+                  valueFrom: {secretKeyRef: {name: analyser-env, key: POSTGRES_DB}}
+                - name: PGBOUNCE_POOL_SIZE
+                  value: "60"
+              readinessProbe:
+                tcpSocket: {port: 6432}
+                initialDelaySeconds: 5
+                periodSeconds: 10
 
-          location /api/ {
-            proxy_pass http://policia:8000/;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-          }
-        }
-      index.html: |
-        <!DOCTYPE html>
-        <html lang="pt-br">
-        <head>
-          <meta charset="UTF-8">
-          <title>Teste OpenShift</title>
-          <style>
-            body { font-family: sans-serif; max-width: 640px; margin: 40px auto; }
-            input { padding: 8px; width: 70%; }
-            button { padding: 8px 16px; cursor: pointer; }
-            table { border-collapse: collapse; width: 100%; margin-top: 20px; }
-            th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
-            #msg { color: green; } #erro { color: red; }
-          </style>
-        </head>
-        <body>
-          <h1>Cadastro de Itens</h1>
-          <form id="form">
-            <input id="nome" placeholder="Nome do item" required>
-            <button type="submit">Inserir</button>
-          </form>
-          <p id="msg"></p><p id="erro"></p>
-          <table>
-            <thead><tr><th>ID</th><th>Nome</th></tr></thead>
-            <tbody id="lista"></tbody>
-          </table>
-          <script>
-            const api = '/api';
-            async function listar() {
-              const r = await fetch(api + '/items');
-              const d = await r.json();
-              document.getElementById('lista').innerHTML =
-                d.itens.map(i => `<tr><td>${i.id}</td><td>${i.nome}</td></tr>`).join('');
-            }
-            document.getElementById('form').addEventListener('submit', async (e) => {
-              e.preventDefault();
-              document.getElementById('msg').textContent = '';
-              document.getElementById('erro').textContent = '';
-              try {
-                const nome = document.getElementById('nome').value;
-                const r = await fetch(api + '/items', {
-                  method: 'POST',
-                  headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify({nome})
-                });
-                if (!r.ok) throw new Error(await r.text());
-                document.getElementById('nome').value = '';
-                document.getElementById('msg').textContent = 'Inserido com sucesso!';
-                listar();
-              } catch (err) {
-                document.getElementById('erro').textContent = 'Erro: ' + err.message;
-              }
-            });
-            listar();
-          </script>
-        </body>
-        </html>
+  # ---------------------------------------------------------------------------------------------------------------
+  # API (FastAPI :3000) — a mesma imagem roda o túnel (Deployment à parte, command diferente)
+  # ---------------------------------------------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: analyser-data
+      labels: {app: pf-policia-dev}
+    spec:
+      accessModes: ["ReadWriteOnce"]   # para replicas>1 use uma StorageClass ReadWriteMany (NFS/CephFS)
+      resources:
+        requests:
+          storage: 30Gi
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: analyser-logs
+      labels: {app: pf-policia-dev}
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 5Gi
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: analyser-cache
+      labels: {app: pf-policia-dev}
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: api
+      labels: {app: pf-policia-dev}
+    spec:
+      selector: {app: pf-policia-dev, component: api}
+      ports:
+        - {name: http, port: 3000, targetPort: 3000}
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: api
+      labels: {app: pf-policia-dev}
+    spec:
+      replicas: 1   # suba para 2 com StorageClass ReadWriteMany nos PVCs (estado já vive no banco)
+      selector:
+        matchLabels: {app: pf-policia-dev, component: api}
+      template:
+        metadata:
+          labels: {app: pf-policia-dev, component: api}
+        spec:
+          # O .env que a API lê E escreve (env_utils.py) nasce do Secret (read-only) copiado
+          # para um emptyDir gravável — o Secret nunca é montado direto no caminho gravável.
+          # Efeito colateral: edições feitas na tela de Administração valem até o pod reiniciar.
+          initContainers:
+            - name: seed-env
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
+              command: ["sh", "-c", "cp /seed/.env /runtime/.env && chmod 660 /runtime/.env"]
+              volumeMounts:
+                - {name: seed, mountPath: /seed, readOnly: true}
+                - {name: runtime, mountPath: /runtime}
+          containers:
+            - name: api
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
+              ports:
+                - {containerPort: 3000, name: http}
+              env:
+                - name: ENV_FILE
+                  value: /app/runtime/.env
+                - name: API_WORKERS
+                  value: "1"
+                - name: API_REPLICA_ID
+                  valueFrom:
+                    fieldRef: {fieldPath: metadata.name}
+              startupProbe:
+                httpGet: {path: /api/health, port: http}
+                periodSeconds: 5
+                failureThreshold: 120   # até 10 min: primeira subida aplica db/migracoes
+              readinessProbe:
+                httpGet: {path: /api/health, port: http}
+                periodSeconds: 10
+              livenessProbe:
+                httpGet: {path: /api/health, port: http}
+                periodSeconds: 20
+                timeoutSeconds: 5
+                failureThreshold: 5
+              resources:
+                requests: {cpu: "1", memory: 2Gi}
+                limits: {memory: 8Gi, cpu: "4"}   # torch/transformers em CPU precisam de RAM
+              volumeMounts:
+                - {name: runtime, mountPath: /app/runtime}
+                - {name: data, mountPath: /app/data}
+                - {name: logs, mountPath: /app/logs}
+                - {name: cache, mountPath: /app/.cache}
+          volumes:
+            - name: seed
+              secret:
+                secretName: analyser-env
+            - name: runtime
+              emptyDir: {}
+            - name: data
+              persistentVolumeClaim: {claimName: analyser-data}
+            - name: logs
+              persistentVolumeClaim: {claimName: analyser-logs}
+            - name: cache
+              persistentVolumeClaim: {claimName: analyser-cache}
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # Túnel NAT (relay WebSocket central<->nós; processo ÚNICO de propósito — nunca escale)
+  # ---------------------------------------------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: tunel
+      labels: {app: pf-policia-dev}
+    spec:
+      selector: {app: pf-policia-dev, component: tunel}
+      ports:
+        - {name: http, port: 3001, targetPort: 3001}
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: tunel
+      labels: {app: pf-policia-dev}
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: {app: pf-policia-dev, component: tunel}
+      template:
+        metadata:
+          labels: {app: pf-policia-dev, component: tunel}
+        spec:
+          initContainers:
+            - name: seed-env
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
+              command: ["sh", "-c", "cp /seed/.env /runtime/.env && chmod 660 /runtime/.env"]
+              volumeMounts:
+                - {name: seed, mountPath: /seed, readOnly: true}
+                - {name: runtime, mountPath: /runtime}
+          containers:
+            - name: tunel
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
+              command: ["sh", "-c", "exec uvicorn tunel_app:app --host 0.0.0.0 --port 3001 --log-config logging.json"]
+              ports:
+                - {containerPort: 3001, name: http}
+              env:
+                - name: ENV_FILE
+                  value: /app/runtime/.env
+              startupProbe:
+                httpGet: {path: /tunel/saude, port: http}
+                periodSeconds: 5
+                failureThreshold: 60
+              readinessProbe:
+                httpGet: {path: /tunel/saude, port: http}
+                periodSeconds: 15
+              resources:
+                requests: {cpu: 250m, memory: 512Mi}
+                limits: {memory: 2Gi}
+              volumeMounts:
+                - {name: runtime, mountPath: /app/runtime}
+                - {name: logs, mountPath: /app/logs}
+          volumes:
+            - name: seed
+              secret:
+                secretName: analyser-env
+            - name: runtime
+              emptyDir: {}
+            - name: logs
+              persistentVolumeClaim: {claimName: analyser-logs}
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # Web (nginx-unprivileged :8080 + estáticos embutidos + proxy /api/ e /tunel/) e a Route
+  # ---------------------------------------------------------------------------------------------------------------
   - apiVersion: v1
     kind: Service
     metadata:
       name: web
-      labels:
-        app: pf-policia-dev
+      labels: {app: pf-policia-dev}
     spec:
-      selector:
-        app: pf-policia-dev
-        component: nginx
+      selector: {app: pf-policia-dev, component: web}
       ports:
-        - name: http
-          port: 8080
-          targetPort: 8080
+        - {name: http, port: 8080, targetPort: 8080}
   - apiVersion: apps/v1
     kind: Deployment
     metadata:
-      name: nginx
-      labels:
-        app: pf-policia-dev
+      name: web
+      labels: {app: pf-policia-dev}
     spec:
       replicas: 1
       selector:
-        matchLabels:
-          app: pf-policia-dev
-          component: nginx
+        matchLabels: {app: pf-policia-dev, component: web}
       template:
         metadata:
-          labels:
-            app: pf-policia-dev
-            component: nginx
+          labels: {app: pf-policia-dev, component: web}
         spec:
           containers:
-            - name: nginx
-              image: docker.io/nginxinc/nginx-unprivileged:1.27-alpine
+            - name: web
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-web:latest
               ports:
-                - containerPort: 8080
-              volumeMounts:
-                - name: conf
-                  mountPath: /etc/nginx/conf.d
-                - name: conf
-                  mountPath: /usr/share/nginx/html/index.html
-                  subPath: index.html
-          volumes:
-            - name: conf
-              configMap:
-                name: nginx-conf
+                - {containerPort: 8080, name: http}
+              readinessProbe:
+                httpGet: {path: /login.html, port: http}
+                periodSeconds: 10
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {memory: 512Mi}
   - apiVersion: route.openshift.io/v1
     kind: Route
     metadata:
       name: web
-      labels:
-        app: pf-policia-dev
+      labels: {app: pf-policia-dev}
     spec:
       to:
         kind: Service
@@ -141,59 +357,7 @@ items:
         weight: 100
       port:
         targetPort: http
-  - apiVersion: v1
-    kind: Service
-    metadata:
-      name: postgres
-      labels:
-        app: pf-policia-dev
-    spec:
-      selector:
-        app: pf-policia-dev
-        component: postgres
-      ports:
-        - name: postgres
-          port: 5432
-          targetPort: 5432
-  - apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: postgres
-      labels:
-        app: pf-policia-dev
-    spec:
-      replicas: 1
-      selector:
-        matchLabels:
-          app: pf-policia-dev
-          component: postgres
-      strategy:
-        type: Recreate
-      template:
-        metadata:
-          labels:
-            app: pf-policia-dev
-            component: postgres
-        spec:
-          containers:
-            - name: postgres
-              image: registry.redhat.io/rhel9/postgresql-16:latest
-              ports:
-                - containerPort: 5432
-              env:
-                - name: POSTGRESQL_DATABASE
-                  value: appdb
-                - name: POSTGRESQL_USER
-                  value: appuser
-                - name: POSTGRESQL_PASSWORD
-                  value: apppass
-              volumeMounts:
-                - name: data
-                  mountPath: /var/lib/pgsql/data
-              readinessProbe:
-                exec:
-                  command: ["pg_isready", "-U", "appuser"]
-                initialDelaySeconds: 5
-          volumes:
-            - name: data
-              emptyDir: {}
+      tls:
+        termination: edge
+        insecureEdgeTerminationPolicy: Redirect
+      # websocket é suportado nativamente pela Route — o /tunel/ funciona sem anotação extra
