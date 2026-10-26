@@ -58,7 +58,7 @@ items:
         spec:
           containers:
             - name: nginx
-              image: registry.redhat.io/ubi9/nginx-124:latest
+              image: docker.io/nginxinc/nginx-unprivileged:1.27-alpine
               ports:
                 - containerPort: 8080
               volumeMounts:
