@@ -1,0 +1,260 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: pf-policia-dev
+labels:
+  app: pf-policia-dev
+objects:
+  - apiVersion: image.openshift.io/v1
+    kind: ImageStream
+    metadata:
+      name: api
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      tags:
+        - name: latest
+  - apiVersion: build.openshift.io/v1
+    kind: BuildConfig
+    metadata:
+      name: api-build
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      source:
+        type: Git
+        git: {}
+        binary: {}
+      strategy:
+        type: Docker
+        dockerStrategy: {}
+      output:
+        to:
+          kind: ImageStreamTag
+          name: "api:latest"
+      triggers: []
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: api
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      selector:
+        app: pf-policia-dev
+        component: api
+      ports:
+        - name: http
+          port: 8000
+          targetPort: 8000
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: api
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: pf-policia-dev
+          component: api
+      strategy:
+        type: RollingUpdate
+      template:
+        metadata:
+          labels:
+            app: pf-policia-dev
+            component: api
+        spec:
+          containers:
+            - name: api
+              image: "api:latest"
+              ports:
+                - containerPort: 8000
+              env:
+                - name: DB_HOST
+                  value: postgres
+                - name: DB_PORT
+                  value: "5432"
+                - name: DB_NAME
+                  value: appdb
+                - name: DB_USER
+                  value: appuser
+                - name: DB_PASSWORD
+                  value: apppass
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                initialDelaySeconds: 5
+              livenessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                initialDelaySeconds: 15
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: nginx-conf
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    data:
+      default.conf: |
+        server {
+          listen 8080;
+          server_name _;
+
+          location / {
+            default_type text/html;
+            return 200 '<h1>NGINX OK</h1><p>Proxy /api -> FastAPI</p>';
+          }
+
+          location /api/ {
+            proxy_pass http://api:8000/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+          }
+        }
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: web
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      selector:
+        app: pf-policia-dev
+        component: nginx
+      ports:
+        - name: http
+          port: 8080
+          targetPort: 8080
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: nginx
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: pf-policia-dev
+          component: nginx
+      strategy:
+        type: RollingUpdate
+      template:
+        metadata:
+          labels:
+            app: pf-policia-dev
+            component: nginx
+        spec:
+          containers:
+            - name: nginx
+              image: docker.io/nginx:1.27-alpine
+              ports:
+                - containerPort: 8080
+              volumeMounts:
+                - name: conf
+                  mountPath: /etc/nginx/conf.d
+          volumes:
+            - name: conf
+              configMap:
+                name: nginx-conf
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: postgres
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      selector:
+        app: pf-policia-dev
+        component: postgres
+      ports:
+        - name: postgres
+          port: 5432
+          targetPort: 5432
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: postgres
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: pf-policia-dev
+          component: postgres
+      strategy:
+        type: Recreate
+      template:
+        metadata:
+          labels:
+            app: pf-policia-dev
+            component: postgres
+        spec:
+          containers:
+            - name: postgres
+              image: docker.io/postgres:15-alpine
+              ports:
+                - containerPort: 5432
+              env:
+                - name: POSTGRES_DB
+                  value: appdb
+                - name: POSTGRES_USER
+                  value: appuser
+                - name: POSTGRES_PASSWORD
+                  value: apppass
+              volumeMounts:
+                - name: data
+                  mountPath: /var/lib/postgresql/data
+                  subPath: pgdata
+              readinessProbe:
+                exec:
+                  command: ["pg_isready", "-U", "appuser"]
+                initialDelaySeconds: 5
+          volumes:
+            - name: data
+              emptyDir: {}
+  - apiVersion: route.openshift.io/v1
+    kind: Route
+    metadata:
+      name: app
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      path: /
+      to:
+        kind: Service
+        name: web
+        weight: 100
+      port:
+        targetPort: http
+  - apiVersion: route.openshift.io/v1
+    kind: Route
+    metadata:
+      name: api
+      namespace: pf-policia-dev
+      labels:
+        app: pf-policia-dev
+    spec:
+      path: /api
+      to:
+        kind: Service
+        name: api
+        weight: 100
+      port:
+        targetPort: http
