@@ -2,66 +2,6 @@ apiVersion: v1
 kind: List
 items:
   - apiVersion: v1
-    kind: Service
-    metadata:
-      name: api
-      labels:
-        app: pf-policia-dev
-    spec:
-      selector:
-        app: pf-policia-dev
-        component: api
-      ports:
-        - name: http
-          port: 8000
-          targetPort: 8000
-  - apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: api
-      labels:
-        app: pf-policia-dev
-    spec:
-      replicas: 1
-      selector:
-        matchLabels:
-          app: pf-policia-dev
-          component: api
-      strategy:
-        type: RollingUpdate
-      template:
-        metadata:
-          labels:
-            app: pf-policia-dev
-            component: api
-        spec:
-          containers:
-            - name: api
-              image: api:latest
-              ports:
-                - containerPort: 8000
-              env:
-                - name: DB_HOST
-                  value: postgres
-                - name: DB_PORT
-                  value: "5432"
-                - name: DB_NAME
-                  value: appdb
-                - name: DB_USER
-                  value: appuser
-                - name: DB_PASSWORD
-                  value: apppass
-              readinessProbe:
-                httpGet:
-                  path: /health
-                  port: 8000
-                initialDelaySeconds: 5
-              livenessProbe:
-                httpGet:
-                  path: /health
-                  port: 8000
-                initialDelaySeconds: 15
-  - apiVersion: v1
     kind: ConfigMap
     metadata:
       name: nginx-conf
@@ -75,11 +15,11 @@ items:
 
           location / {
             default_type text/html;
-            return 200 '<h1>NGINX OK</h1><p>Proxy /api -> FastAPI</p>';
+            return 200 '<h1>NGINX OK</h1><p>Proxy /api/ -> FastAPI (servico policia)</p>';
           }
 
           location /api/ {
-            proxy_pass http://api:8000/;
+            proxy_pass http://policia:8000/;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
           }
@@ -110,8 +50,6 @@ items:
         matchLabels:
           app: pf-policia-dev
           component: nginx
-      strategy:
-        type: RollingUpdate
       template:
         metadata:
           labels:
@@ -130,6 +68,19 @@ items:
             - name: conf
               configMap:
                 name: nginx-conf
+  - apiVersion: route.openshift.io/v1
+    kind: Route
+    metadata:
+      name: web
+      labels:
+        app: pf-policia-dev
+    spec:
+      to:
+        kind: Service
+        name: web
+        weight: 100
+      port:
+        targetPort: http
   - apiVersion: v1
     kind: Service
     metadata:
@@ -166,7 +117,7 @@ items:
         spec:
           containers:
             - name: postgres
-              image: registry.redhat.io/rhel8/postgresql-15:latest
+              image: registry.redhat.io/rhel9/postgresql-16:latest
               ports:
                 - containerPort: 5432
               env:
@@ -186,31 +137,3 @@ items:
           volumes:
             - name: data
               emptyDir: {}
-  - apiVersion: route.openshift.io/v1
-    kind: Route
-    metadata:
-      name: app
-      labels:
-        app: pf-policia-dev
-    spec:
-      path: /
-      to:
-        kind: Service
-        name: web
-        weight: 100
-      port:
-        targetPort: http
-  - apiVersion: route.openshift.io/v1
-    kind: Route
-    metadata:
-      name: api
-      labels:
-        app: pf-policia-dev
-    spec:
-      path: /api
-      to:
-        kind: Service
-        name: api
-        weight: 100
-      port:
-        targetPort: http
