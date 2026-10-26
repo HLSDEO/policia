@@ -14,8 +14,8 @@ items:
           server_name _;
 
           location / {
-            default_type text/html;
-            return 200 '<h1>NGINX OK</h1><p>Proxy /api/ -> FastAPI (servico policia)</p>';
+            root /usr/share/nginx/html;
+            index index.html;
           }
 
           location /api/ {
@@ -24,6 +24,63 @@ items:
             proxy_set_header X-Real-IP $remote_addr;
           }
         }
+      index.html: |
+        <!DOCTYPE html>
+        <html lang="pt-br">
+        <head>
+          <meta charset="UTF-8">
+          <title>Teste OpenShift</title>
+          <style>
+            body { font-family: sans-serif; max-width: 640px; margin: 40px auto; }
+            input { padding: 8px; width: 70%; }
+            button { padding: 8px 16px; cursor: pointer; }
+            table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+            th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+            #msg { color: green; } #erro { color: red; }
+          </style>
+        </head>
+        <body>
+          <h1>Cadastro de Itens</h1>
+          <form id="form">
+            <input id="nome" placeholder="Nome do item" required>
+            <button type="submit">Inserir</button>
+          </form>
+          <p id="msg"></p><p id="erro"></p>
+          <table>
+            <thead><tr><th>ID</th><th>Nome</th></tr></thead>
+            <tbody id="lista"></tbody>
+          </table>
+          <script>
+            const api = '/api';
+            async function listar() {
+              const r = await fetch(api + '/items');
+              const d = await r.json();
+              document.getElementById('lista').innerHTML =
+                d.itens.map(i => `<tr><td>${i.id}</td><td>${i.nome}</td></tr>`).join('');
+            }
+            document.getElementById('form').addEventListener('submit', async (e) => {
+              e.preventDefault();
+              document.getElementById('msg').textContent = '';
+              document.getElementById('erro').textContent = '';
+              try {
+                const nome = document.getElementById('nome').value;
+                const r = await fetch(api + '/items', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({nome})
+                });
+                if (!r.ok) throw new Error(await r.text());
+                document.getElementById('nome').value = '';
+                document.getElementById('msg').textContent = 'Inserido com sucesso!';
+                listar();
+              } catch (err) {
+                document.getElementById('erro').textContent = 'Erro: ' + err.message;
+              }
+            });
+            listar();
+          </script>
+        </body>
+        </html>
   - apiVersion: v1
     kind: Service
     metadata:
@@ -64,6 +121,9 @@ items:
               volumeMounts:
                 - name: conf
                   mountPath: /etc/nginx/conf.d
+                - name: conf
+                  mountPath: /usr/share/nginx/html/index.html
+                  subPath: index.html
           volumes:
             - name: conf
               configMap:
