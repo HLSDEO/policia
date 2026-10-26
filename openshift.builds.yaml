@@ -1,0 +1,130 @@
+# ===================================================================================================================
+# Build DENTRO do cluster (Source strategy a partir do GitHub) — mesmo padrão do BuildConfig
+# "policia" que já funcionava neste projeto.
+#
+# Uso:
+#   oc apply -f openshift.builds.yaml
+#   oc start-build analyser-web-build        # pequeno, bom para validar o fluxo primeiro
+#   oc start-build analyser-pgbouncer-build
+#   oc start-build analyser-api-build        # o mais pesado (torch + tesseract + JRE ~ 15-25 min)
+#   oc start-build analyser-postgres-build
+# (pelo console: Builds -> Select Project -> Create Build Config já aplicado -> Start Build)
+#
+# Cada build sobe a imagem para o ImageStreamTag local (analyser-api:latest etc.), que é exatamente
+# a referência que o openshift.yaml usa — quando o build termina, os pods em ImagePullBackOff
+# conseguem puxar sozinhos no próximo retry (ou force: oc rollout restart deployment/<nome>).
+#
+# Se o repositório GitHub for PRIVADO, vincule um token ao SA do builder:
+#   oc create secret generic github-token --from-literal=username=<user> --from-literal=token=<PAT>
+#   oc secrets link builder github-token
+# ===================================================================================================================
+apiVersion: v1
+kind: List
+items:
+
+  # ImageStreams de destino (o registry interno só serve tag que pertence a um ImageStream)
+  - apiVersion: image.openshift.io/v1
+    kind: ImageStream
+    metadata:
+      name: analyser-api
+      labels: {app: pf-policia-dev}
+    spec: {tags: [{name: latest}]}
+  - apiVersion: image.openshift.io/v1
+    kind: ImageStream
+    metadata:
+      name: analyser-web
+      labels: {app: pf-policia-dev}
+    spec: {tags: [{name: latest}]}
+  - apiVersion: image.openshift.io/v1
+    kind: ImageStream
+    metadata:
+      name: analyser-postgres
+      labels: {app: pf-policia-dev}
+    spec: {tags: [{name: latest}]}
+  - apiVersion: image.openshift.io/v1
+    kind: ImageStream
+    metadata:
+      name: analyser-pgbouncer
+      labels: {app: pf-policia-dev}
+    spec: {tags: [{name: latest}]}
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # BuildConfigs — origem única: https://github.com/HLSDEO/policia.git @ main (cada um com seu Dockerfile)
+  # ---------------------------------------------------------------------------------------------------------------
+  - apiVersion: build.openshift.io/v1
+    kind: BuildConfig
+    metadata:
+      name: analyser-api-build
+      labels: {app: pf-policia-dev}
+    spec:
+      runPolicy: Serial
+      source:
+        type: Git
+        git: {uri: "https://github.com/HLSDEO/policia.git", ref: "main"}
+      strategy:
+        type: Source
+        sourceStrategy:
+          dockerfilePath: Dockerfile.api
+          # forPullSecret: github-token   # descomente se o repo for privado
+      output:
+        to: {kind: ImageStreamTag, name: "analyser-api:latest"}
+      resources:
+        requests: {cpu: 250m, memory: 1Gi}
+        limits: {cpu: "2", memory: 4Gi}
+  - apiVersion: build.openshift.io/v1
+    kind: BuildConfig
+    metadata:
+      name: analyser-web-build
+      labels: {app: pf-policia-dev}
+    spec:
+      runPolicy: Serial
+      source:
+        type: Git
+        git: {uri: "https://github.com/HLSDEO/policia.git", ref: "main"}
+      strategy:
+        type: Source
+        sourceStrategy:
+          dockerfilePath: Dockerfile.web
+          # forPullSecret: github-token
+      output:
+        to: {kind: ImageStreamTag, name: "analyser-web:latest"}
+  - apiVersion: build.openshift.io/v1
+    kind: BuildConfig
+    metadata:
+      name: analyser-pgbouncer-build
+      labels: {app: pf-policia-dev}
+    spec:
+      runPolicy: Serial
+      source:
+        type: Git
+        git: {uri: "https://github.com/HLSDEO/policia.git", ref: "main"}
+      strategy:
+        type: Source
+        sourceStrategy:
+          dockerfilePath: Dockerfile.pgbouncer
+          # forPullSecret: github-token
+      output:
+        to: {kind: ImageStreamTag, name: "analyser-pgbouncer:latest"}
+  - apiVersion: build.openshift.io/v1
+    kind: BuildConfig
+    metadata:
+      name: analyser-postgres-build
+      labels: {app: pf-policia-dev}
+    spec:
+      runPolicy: Serial
+      source:
+        type: Git
+        git: {uri: "https://github.com/HLSDEO/policia.git", ref: "main"}
+      strategy:
+        type: Source
+        sourceStrategy:
+          dockerfilePath: Dockerfile.postgres
+          # forPullSecret: github-token
+          # O Dockerfile.postgres usa base registry.redhat.io/rhel9/postgresql-16, que exige
+          # credencial Red Hat para o SA "builder":
+          #   oc secrets link builder <seu-secret-redhat>
+          # Se o build falhar com 401/403 na base, use a imagem comunitária idêntica (mesmos
+          # scripts e mesmo pgvector) sem editar nada:
+          #   oc patch bc/analyser-postgres-build --type=merge -p '{"spec":{"strategy":{"sourceStrategy":{"buildArgs":[{"name":"POSTGRES_BASE","value":"quay.io/sclorg/postgresql-16-c9s"}]}}}}'
+      output:
+        to: {kind: ImageStreamTag, name: "analyser-postgres:latest"}

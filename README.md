@@ -38,22 +38,45 @@ pod reinicia. Para tornar uma mudança permanente, atualize o Secret e faça
 
 ## 1. Build das imagens
 
+### 1a. Build DENTRO do cluster (recomendado — `openshift.builds.yaml`)
+
+Os `BuildConfig` buildam este repositório do GitHub direto no cluster e publicam nos
+ImageStreams `analyser-*:latest` que o `openshift.yaml` já referencia:
+
+```bash
+oc apply -f openshift.builds.yaml
+oc start-build analyser-web-build        # ~1 min — valida o fluxo
+oc start-build analyser-pgbouncer-build
+oc start-build analyser-postgres-build
+oc start-build analyser-api-build        # o mais pesado (torch CPU + tesseract + JRE): 15-25 min
+```
+
+(Pelo console: Developer → Builds → Start Build.) commits novos no branch `main` exigem
+`oc start-build` de novo — sem trigger automático de propósito.
+
+- Repositório **privado**: crie um secret de token e descomente `forPullSecret` no
+  BuildConfig (instrução no topo do `openshift.builds.yaml`).
+- Build do Postgres com HTTP 401/403 ao puxar `registry.redhat.io`: vincule sua credencial
+  Red Hat ao SA `builder` (`oc secrets link builder <secret>`) **ou** use a base comunitária
+  idêntica com o `oc patch` documentado no próprio YAML.
+
+Quando cada build termina, os pods em `ImagePullBackOff` puxam a tag sozinhos no próximo
+retry — para não esperar: `oc rollout restart deployment/api` (ou web/postgres/pgbouncer).
+
+### 1b. Alternativa: build local + push (podman/docker)
+
 ```bash
 REG=$(oc registry info)                      # ex.: default-registry.apps.<cluster>...
 PROJ=pf-policia-dev
 oc registry login                            # ou: podman login -u $(oc whoami) -p $(oc whoami -t) $REG
 
-# ImageStreams de destino (o push cria as tags)
-for im in analyser-api analyser-web analyser-postgres analyser-pgbouncer; do
-  oc create imagestream $im --dry-run=client -o yaml | oc apply -f -
-done
-
 podman build -f Dockerfile.api       -t $REG/$PROJ/analyser-api:latest .
 podman build -f Dockerfile.web       -t $REG/$PROJ/analyser-web:latest .
 podman build -f Dockerfile.pgbouncer -t $REG/$PROJ/analyser-pgbouncer:latest .
 podman build -f Dockerfile.postgres  -t $REG/$PROJ/analyser-postgres:latest .
-podman push --authfile=$XDG_RUNTIME_DIR/containers/auth.json -a $REG/$PROJ/analyser-api:latest
-# (ou: podman push ... para cada uma das quatro tags)
+for im in analyser-api analyser-web analyser-postgres analyser-pgbouncer; do
+  podman push $REG/$PROJ/$im:latest
+done
 ```
 
 O build da API é pesado (torch CPU + transformers + tesseract + JRE + ffmpeg).
