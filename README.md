@@ -1,7 +1,7 @@
 # Analyser — deploy no OpenShift (Red Hat)
 
 Porto do `C:\Git\analyser` (Docker Compose) para o OpenShift, seguindo os padrões que já
-funcionavam neste repositório (namespace `pf-policia-dev`, label `app: pf-policia-dev`,
+funcionavam neste repositório (namespace `pf-policia`, label `app: pf-policia`,
 Route TLS, porta 8080 no front, imagens Red Hat).
 
 ## O que mudou na arquitetura
@@ -30,7 +30,7 @@ pod reinicia. Para tornar uma mudança permanente, atualize o Secret e faça
 
 ## Pré-requisitos
 
-- `oc` logado no projeto `pf-policia-dev` (ajuste os labels/namespace no `openshift.yaml` se for outro).
+- `oc` logado no projeto `pf-policia` (ajuste os labels/namespace no `openshift.yaml` se for outro).
 - Para a **Opção B** (build local): `podman` (ou `docker`) com acesso aos repositórios upstream
   (`python:3.12-slim`, `alpine`, `nginx-unprivileged`) e ao `registry.redhat.io` (login para a
   imagem base do Postgres). Na **Opção A** quem baixa tudo é o próprio cluster.
@@ -68,7 +68,7 @@ tag `:latest` (sem trigger automático de ImageStream).
 
 ```bash
 REG=$(oc registry info)                      # ex.: default-registry.apps.<cluster>...
-PROJ=pf-policia-dev
+PROJ=pf-policia
 oc registry login                            # ou: podman login -u $(oc whoami) -p $(oc whoami -t) $REG
 
 # ImageStreams de destino (o push cria as tags)

@@ -1,7 +1,7 @@
 # ===================================================================================================================
 # Builds no cluster (OpenShift) — 4 imagens a partir DESTE repositório Git, uma por Dockerfile.
 #
-# Cole este arquivo inteiro no console (Developer → Import YAML) no projeto pf-policia-dev, ou:
+# Cole este arquivo inteiro no console (Developer → Import YAML) no projeto pf-policia, ou:
 #   oc apply -f openshift-builds.yaml
 #
 # Nenhum trigger automático: cada build é iniciado manualmente (console: Builds → Start Build,
@@ -25,13 +25,13 @@ items:
     kind: ImageStream
     metadata:
       name: analyser-api
-      labels: {app: pf-policia-dev}
+      labels: {app: pf-policia}
     spec: {}
   - apiVersion: build.openshift.io/v1
     kind: BuildConfig
     metadata:
       name: analyser-api
-      labels: {app: pf-policia-dev}
+      labels: {app: pf-policia}
     spec:
       runPolicy: Serial
       completionDeadlineSeconds: 5400        # 1,5 h de teto para o build
@@ -65,13 +65,13 @@ items:
     kind: ImageStream
     metadata:
       name: analyser-web
-      labels: {app: pf-policia-dev}
+      labels: {app: pf-policia}
     spec: {}
   - apiVersion: build.openshift.io/v1
     kind: BuildConfig
     metadata:
       name: analyser-web
-      labels: {app: pf-policia-dev}
+      labels: {app: pf-policia}
     spec:
       runPolicy: Serial
       completionDeadlineSeconds: 1800
@@ -106,13 +106,13 @@ items:
     kind: ImageStream
     metadata:
       name: analyser-postgres
-      labels: {app: pf-policia-dev}
+      labels: {app: pf-policia}
     spec: {}
   - apiVersion: build.openshift.io/v1
     kind: BuildConfig
     metadata:
       name: analyser-postgres
-      labels: {app: pf-policia-dev}
+      labels: {app: pf-policia}
     spec:
       runPolicy: Serial
       completionDeadlineSeconds: 1800
@@ -147,13 +147,13 @@ items:
     kind: ImageStream
     metadata:
       name: analyser-pgbouncer
-      labels: {app: pf-policia-dev}
+      labels: {app: pf-policia}
     spec: {}
   - apiVersion: build.openshift.io/v1
     kind: BuildConfig
     metadata:
       name: analyser-pgbouncer
-      labels: {app: pf-policia-dev}
+      labels: {app: pf-policia}
     spec:
       runPolicy: Serial
       completionDeadlineSeconds: 1200
