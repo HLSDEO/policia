@@ -78,6 +78,10 @@ CREATE TABLE USR_TB01_USUARIOS (
     -- | 'administrador'.
     TP_PERFIL        VARCHAR(20) NOT NULL DEFAULT 'analista',
     IN_ATIVO         BOOLEAN NOT NULL DEFAULT true,
+    -- Desligar a IA so deste usuario (tela Usuarios -> "Desativar IA"): sem IA nenhuma, nem a
+    -- propria, nem a das Configuracoes. Espelho do DELEGACIAS.IN_IA_ATIVA, so que por pessoa
+    -- (ver funcoes/ia_delegacia.py).
+    IN_IA_ATIVA      BOOLEAN NOT NULL DEFAULT true,
     DT_CADASTRO      TIMESTAMP NOT NULL DEFAULT now(),
     DT_ULTIMO_LOGIN  TIMESTAMP,
     IN_APROVADO      BOOLEAN NOT NULL DEFAULT true,

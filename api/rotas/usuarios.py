@@ -40,6 +40,10 @@ class AprovadoIn(BaseModel):
     aprovado: bool
 
 
+class IaAtivaIn(BaseModel):
+    ativa: bool
+
+
 class RedefinicaoIn(BaseModel):
     # Só tenta enviar se o admin pedir E o usuário tiver e-mail; o link é devolvido de qualquer jeito.
     enviar_email: bool = False
@@ -115,6 +119,31 @@ def alterar_aprovado(id_usuario: int, payload: AprovadoIn, admin: dict = Depends
         id_usuario_alvo=id_usuario,
         tp_acao="aprovar" if payload.aprovado else "revogar_aprovacao",
         detalhes={"aprovado": payload.aprovado},
+    )
+    return {"ok": True}
+
+
+@router.post("/api/usuarios/{id_usuario}/ia")
+def alterar_ia_usuario(id_usuario: int, payload: IaAtivaIn):
+    """Liga ou desliga a IA de um usuário.
+
+    Desligada, ele perde TODA IA — nem a própria, nem a das Configurações (o portão é o mesmo do
+    flag por delegacia, funcoes/ia_delegacia.py). Diferente de desativar a conta: o analista segue
+    trabalhando no resto do sistema. A configuração própria, se houver, fica guardada — religar a
+    IA devolve exatamente o que era antes."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE seguranca.usr_tb01_usuarios SET in_ia_ativa = %s WHERE id_usuario = %s",
+                (payload.ativa, id_usuario),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        conn.commit()
+    registrar_auditoria_usuario(
+        id_usuario_alvo=id_usuario,
+        tp_acao="ativar_ia" if payload.ativa else "desativar_ia",
+        detalhes={"ativa": payload.ativa},
     )
     return {"ok": True}
 

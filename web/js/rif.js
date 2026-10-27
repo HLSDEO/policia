@@ -979,6 +979,7 @@
       ordem: ordem && ordem !== "indexador" ? ordem : null,
       mes: filtroMes || null,
       cpessoa: filtroPessoa ? filtroPessoa.chave : null,
+      ebusca: $.trim($("#f-env-busca").val()) || null,
       etipo: $("#f-env-tipo").val() || null,
       epessoa: $("#f-env-pessoa").val() || null,
       epep: $("#f-env-pep").is(":checked") ? "1" : null,
@@ -1000,6 +1001,7 @@
     if (estadoSalvo.uf) $("#f-com-uf").val(estadoSalvo.uf);
     if (estadoSalvo.etitular) $("#f-com-titular").val(estadoSalvo.etitular);
     if (estadoSalvo.ordem) $("#f-com-ordem").val(estadoSalvo.ordem);
+    if (estadoSalvo.ebusca) $("#f-env-busca").val(estadoSalvo.ebusca);
     if (estadoSalvo.etipo) $("#f-env-tipo").val(estadoSalvo.etipo);
     if (estadoSalvo.epessoa) $("#f-env-pessoa").val(estadoSalvo.epessoa);
     if (estadoSalvo.epep) $("#f-env-pep").prop("checked", true);
@@ -1253,6 +1255,7 @@
   var debounce = window.AnalyserUtils.debounce;
   $("#f-com-busca").on("input", debounce(function () { aplicarComunicacoes(); }, 250));
   $("#f-com-inst, #f-com-uf, #f-com-titular, #f-com-ordem").on("change", function () { aplicarComunicacoes(); });
+  $("#f-env-busca").on("input", debounce(function () { aplicarEnvolvidos(); }, 250));
   $("#f-env-tipo, #f-env-pessoa").on("change", function () { aplicarEnvolvidos(); });
   $("#f-env-pep, #f-env-servidor").on("change", function () { aplicarEnvolvidos(); });
   $("#f-oco-busca").on("input", debounce(function () { aplicarOcorrencias(); }, 250));

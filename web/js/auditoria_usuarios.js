@@ -29,6 +29,8 @@
     configurar_ia: "Configurar IA própria",
     apagar_ia: "Remover IA própria",
     alterar_delegacia: "Alterar delegacia",
+    ativar_ia: "Reativar IA do usuário",
+    desativar_ia: "Desativar IA do usuário",
   };
 
   var paginaAtual = 0;

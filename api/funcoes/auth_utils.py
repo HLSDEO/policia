@@ -814,7 +814,7 @@ def encerrar_sessao(token: str | None) -> None:
 def listar_usuarios() -> list[dict]:
     query = """
         SELECT u.id_usuario, u.no_login, u.no_usuario, u.no_email, u.in_admin, u.in_ativo, u.in_aprovado,
-               u.dt_cadastro, u.dt_ultimo_login, u.id_delegacia, d.no_delegacia, u.tp_perfil
+               u.dt_cadastro, u.dt_ultimo_login, u.id_delegacia, d.no_delegacia, u.tp_perfil, u.in_ia_ativa
         FROM seguranca.usr_tb01_usuarios u
         LEFT JOIN seguranca.delegacias d ON d.id_delegacia = u.id_delegacia
         ORDER BY u.no_usuario

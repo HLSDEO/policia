@@ -254,6 +254,7 @@ from funcoes.investigacao_utils import (
     atualizar_apelido_extracao,
     atualizar_apelido_prova,
     atualizar_delegacia_inquerito,
+    atualizar_situacao_inquerito,
     salvar_contexto_investigacao,
     revogar_permissao,
     usuario_tem_acesso_inquerito,
@@ -781,6 +782,28 @@ def atualizar_delegacia_rota(
     if not atualizado:
         raise HTTPException(status_code=404, detail="Inquérito não encontrado.")
     return {"ok": True}
+
+
+class SituacaoInqueritoIn(BaseModel):
+    """Corpo aceito pelo PUT que muda a situação do inquérito."""
+
+    situacao: str = Field(..., max_length=10)
+
+
+@router.put("/api/investigacao/inqueritos/{id_inquerito}/situacao")
+def atualizar_situacao_rota(
+    id_inquerito: int, payload: SituacaoInqueritoIn, usuario: dict = Depends(exigir_gestor_inquerito)
+):
+    """Ativo | Arquivado — a situação do inquérito em si (não o andamento do processamento).
+
+    Só o gestor (criador ou permissão in_admin): arquivar encerra o caso para a equipe, e essa
+    decisão é de quem responde pelo inquérito, não de qualquer um que o edita."""
+    situacao = (payload.situacao or "").strip().lower()
+    if situacao not in ("ativo", "arquivado"):
+        raise HTTPException(status_code=400, detail="Situação inválida (use ativo ou arquivado).")
+    if not atualizar_situacao_inquerito(id_inquerito, situacao):
+        raise HTTPException(status_code=404, detail="Inquérito não encontrado.")
+    return {"ok": True, "situacao": situacao}
 
 
 class ContextoInvestigacaoIn(BaseModel):

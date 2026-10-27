@@ -161,6 +161,7 @@
       if (aprov === "pendente" && u.in_aprovado) return false;
       if (deleg === "__sem__" && u.id_delegacia) return false;
       if (deleg && deleg !== "__sem__" && String(u.id_delegacia) !== deleg) return false;
+      if (ia === "desativada" && u.in_ia_ativa !== false) return false;
       if (ia === "propria" && !temIaPropria(u.id_usuario)) return false;
       if (ia === "padrao" && temIaPropria(u.id_usuario)) return false;
       return true;
@@ -293,7 +294,10 @@
     $("<td>").text(nomeDelegacia(u.id_delegacia)).appendTo($tr);
     $("<td>").text(rotuloPerfil(u.tp_perfil)).appendTo($tr);
     var $tdIa = $("<td>").addClass("ia-celula").appendTo($tr);
-    if (temIaPropria(u.id_usuario)) {
+    if (u.in_ia_ativa === false) {
+      $tdIa.append($("<span>").addClass("badge badge-erro").text("Desativada"))
+        .attr("title", "A IA está desligada para este usuário — ele não usa IA nenhuma (nem a própria, nem a das Configurações)");
+    } else if (temIaPropria(u.id_usuario)) {
       $tdIa.append($("<span>").addClass("badge badge-ok").text("Própria"));
       buscarDetalheIa(u.id_usuario);
       if (detalhesIa[u.id_usuario]) $tdIa.attr("title", String(detalhesIa[u.id_usuario]));
@@ -341,6 +345,9 @@
       .on("click", function () { $menu.removeAttr("open"); abrirModalRedefinicao(u); }).appendTo($lista);
     $("<button>").attr("type", "button").addClass("btn btn-sm btn-secondary").text("IA do usuário")
       .on("click", function () { $menu.removeAttr("open"); abrirModalConfigIa(u); }).appendTo($lista);
+    $("<button>").attr("type", "button").addClass("btn btn-sm btn-secondary")
+      .text(u.in_ia_ativa === false ? "Reativar IA" : "Desativar IA")
+      .on("click", function () { $menu.removeAttr("open"); confirmarAlterarIa(u); }).appendTo($lista);
     $("<a>").addClass("btn btn-sm btn-secondary").text("Histórico")
       .attr("href", "auditoria.html").attr("title", "Ver trilha de auditoria da gestão de usuários")
       .on("click", function () { $menu.removeAttr("open"); }).appendTo($lista);
@@ -415,6 +422,34 @@
         .done(function () {
           u.in_ativo = ativar;
           Toast.sucesso(ativar ? "Usuário reativado." : "Usuário desativado.");
+          aplicarFiltros();
+        })
+        .fail(function (xhr) {
+          Toast.erro((xhr.responseJSON && xhr.responseJSON.detail) || "Não foi possível salvar. Tente de novo.");
+        });
+    });
+  }
+
+  function confirmarAlterarIa(u) {
+    var ligar = u.in_ia_ativa === false;
+    Dialogo.confirmar({
+      titulo: ligar ? "Reativar IA" : "Desativar IA",
+      mensagem: ligar
+        ? 'Religar a IA de "' + u.no_usuario + '"? Ele volta a usar a IA própria (se tiver) ou a das Configurações.'
+        : 'Desativar a IA de "' + u.no_usuario + " (" + u.no_login + ')"? Ele perde TODO o acesso à IA — chat, busca automática, análise de documento e relatório. O resto do sistema segue normal, e a IA própria dele fica guardada para quando religar.',
+      rotuloOk: ligar ? "Religar IA" : "Desativar IA",
+      perigoso: !ligar
+    }).then(function (ok) {
+      if (!ok) return;
+      $.ajax({
+        url: "/api/usuarios/" + u.id_usuario + "/ia",
+        method: "POST",
+        contentType: "application/json",
+        data: JSON.stringify({ ativa: ligar })
+      })
+        .done(function () {
+          u.in_ia_ativa = ligar;
+          Toast.sucesso(ligar ? "IA do usuário religada." : "IA do usuário desativada.");
           aplicarFiltros();
         })
         .fail(function (xhr) {
@@ -768,7 +803,8 @@
     statusIa("");
     $("#config-ia-intro").text(
       "Provedor, modelo e chave que " + u.no_usuario + " (" + u.no_login + ") vai usar. " +
-      "Sem isso, ele usa a IA das Configurações, como a maioria dos usuários."
+      "Sem isso, ele usa a IA das Configurações, como a maioria dos usuários." +
+      (u.in_ia_ativa === false ? " ATENÇÃO: a IA dele está DESATIVADA — nada disto vale até religar (Mais ▾ → Reativar IA)." : "")
     );
     IAPresets.montarSelectProvedores($("#config-ia-provider"), IAPresets.CHAT_PROVIDERS);
     $("#config-ia-form")[0].reset();
@@ -980,7 +1016,7 @@
               u.no_email || "",
               nomeDelegacia(u.id_delegacia),
               rotuloPerfil(u.tp_perfil),
-              temIaPropria(u.id_usuario) ? "Própria" : "Padrão",
+              u.in_ia_ativa === false ? "Desativada" : (temIaPropria(u.id_usuario) ? "Própria" : "Padrão"),
               u.dt_ultimo_login ? formatarDataHora(u.dt_ultimo_login) : "Nunca acessou",
               u.in_ativo ? "Ativo" : "Desativado",
               u.in_aprovado ? "Aprovado" : "Pendente"

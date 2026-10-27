@@ -39,7 +39,11 @@ from funcoes import canal_extracao, ufdr_cache, ufdr_zip
 from funcoes.auditoria_acesso import registrar_acesso
 from funcoes.auth_utils import exigir_aprovado
 from funcoes.db_utils import get_connection
-from funcoes.ia_delegacia import delegacias_sem_ia, normalizar_delegacia
+from funcoes.ia_delegacia import (
+    delegacias_sem_ia,
+    normalizar_delegacia,
+    usuario_com_ia_desativada,
+)
 from funcoes.hash_utils import (
     HasheadorStreaming,
     calcular_hashes_arquivo,
@@ -4806,7 +4810,7 @@ def listar_inqueritos(usuario: dict, id_inquerito: int | None = None) -> list[di
     params = gerenciar_params + filtro_params
     query = f"""
         SELECT i.id_inquerito, i.nu_inquerito, i.in_caso_inteligencia, i.id_usuario_criador,
-               i.tx_contexto_investigacao,
+               i.tx_contexto_investigacao, i.tp_situacao,
                COALESCE(i.no_delegacia, d.no_delegacia, (
                    SELECT dd.no_delegacia
                    FROM investigacao.inq_tb03_permissoes p
@@ -4890,7 +4894,7 @@ def listar_inqueritos(usuario: dict, id_inquerito: int | None = None) -> list[di
         LEFT JOIN seguranca.delegacias d ON d.id_delegacia = uc.id_delegacia
         LEFT JOIN investigacao.inq_tb02_extracoes e ON e.id_inquerito = i.id_inquerito
         WHERE true{filtro}
-        GROUP BY i.id_inquerito, i.nu_inquerito, i.in_caso_inteligencia, i.id_usuario_criador, i.tx_contexto_investigacao, i.no_delegacia, d.no_delegacia, uc.no_usuario
+        GROUP BY i.id_inquerito, i.nu_inquerito, i.in_caso_inteligencia, i.id_usuario_criador, i.tx_contexto_investigacao, i.tp_situacao, i.no_delegacia, d.no_delegacia, uc.no_usuario
         ORDER BY i.dt_cadastro DESC
     """
     delegacia_fallback = usuario.get("no_delegacia")
@@ -4903,7 +4907,10 @@ def listar_inqueritos(usuario: dict, id_inquerito: int | None = None) -> list[di
     # deixava o botão "Prompt de IA" cinza no card enquanto o resto da tela seguia liberado). Vale
     # a mesma delegacia que o card mostra, mais a do usuário logado — ver funcoes/ia_delegacia.py.
     sem_ia = delegacias_sem_ia()
-    usuario_sem_ia = normalizar_delegacia(delegacia_fallback) in sem_ia
+    # a pessoa também pode ter a IA desligada sozinha (tela Usuários) — aí nenhum card libera IA
+    usuario_sem_ia = normalizar_delegacia(delegacia_fallback) in sem_ia or usuario_com_ia_desativada(
+        usuario.get("id_usuario")
+    )
     for linha in linhas:
         if not linha.get("delegacia") and delegacia_fallback:
             linha["delegacia"] = delegacia_fallback
@@ -5253,6 +5260,22 @@ def atualizar_delegacia_inquerito(id_inquerito: int, no_delegacia: str | None) -
             cur.execute(
                 "UPDATE investigacao.inq_tb01_inqueritos SET no_delegacia = %s WHERE id_inquerito = %s",
                 ((no_delegacia or "").strip() or None, id_inquerito),
+            )
+            atualizado = cur.rowcount > 0
+        conn.commit()
+    return atualizado
+
+
+def atualizar_situacao_inquerito(id_inquerito: int, situacao: str) -> bool:
+    """Grava a situação do inquérito ('ativo' | 'arquivado'). Devolve False se não existir.
+
+    A situação é do inquérito em si, não do processamento: um caso arquivado continua íntegro e
+    navegável, só sai do foco da listagem. Só o gestor muda (ver rota PUT .../situacao)."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE investigacao.inq_tb01_inqueritos SET tp_situacao = %s WHERE id_inquerito = %s",
+                (situacao, id_inquerito),
             )
             atualizado = cur.rowcount > 0
         conn.commit()

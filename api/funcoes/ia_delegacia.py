@@ -1,4 +1,9 @@
-"""Portão único do flag SEGURANCA.DELEGACIAS.IN_IA_ATIVA — "esta delegacia usa a IA do sistema".
+"""Portão único dos flags IN_IA_ATIVA — "esta delegacia (ou este usuário) usa a IA do sistema".
+
+Além do flag por delegacia, existe o flag POR USUÁRIO (USR_TB01_USUARIOS.IN_IA_ATIVA, tela
+Usuários → "Desativar IA"): desliga a IA de uma só pessoa, sem tocar na conta dela nem na
+delegacia. O portão é o mesmo — `bloqueio_ia` confere os dois e qualquer um dos dois negando já
+barra a chamada.
 
 A regra vale pelos **dois lados**, e basta um deles negar:
 
@@ -41,6 +46,24 @@ def delegacias_sem_ia() -> set[str]:
             return {n for n in (normalizar_delegacia(linha[0]) for linha in cur.fetchall()) if n}
 
 
+def usuario_com_ia_desativada(id_usuario: int | None) -> bool:
+    """True se o próprio usuário tem USR_TB01_USUARIOS.IN_IA_ATIVA = false (tela Usuários).
+
+    Consulta por checagem, como `delegacias_sem_ia`: o admin pode religar a qualquer momento e o
+    efeito precisa ser imediato — cache com TTL deixaria o analista bloqueado (ou liberado) por
+    minutos depois da decisão."""
+    if not id_usuario:
+        return False
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT in_ia_ativa FROM seguranca.usr_tb01_usuarios WHERE id_usuario = %s",
+                (id_usuario,),
+            )
+            linha = cur.fetchone()
+    return bool(linha) and not linha[0]
+
+
 def delegacia_do_inquerito(id_inquerito: int) -> str | None:
     """Delegacia dona do inquérito, na mesma ordem de resolução que `listar_inqueritos` usa para o
     rótulo do card — se as duas divergissem, o botão apareceria bloqueado sob um nome e liberado
@@ -70,10 +93,13 @@ def delegacia_do_inquerito(id_inquerito: int) -> str | None:
 
 
 def bloqueio_ia(usuario: dict, id_inquerito: int | None = None) -> str | None:
-    """Nome da delegacia que barra o uso da IA nesta chamada, ou None se pode seguir.
+    """Motivo legível do bloqueio de IA nesta chamada, ou None se pode seguir.
 
-    Confere os dois lados (quem pede e o que está sendo aberto) e devolve o primeiro que estiver
-    com a IA desligada — o nome vai para a mensagem do 403 e para o tooltip do botão."""
+    Confere três pontos e devolve o primeiro negado: a pessoa (flag por usuário, tela Usuários), a
+    delegacia de quem pede e a delegacia do que está sendo aberto. O valor volta na mensagem do 403
+    e no tooltip do botão, então é sempre algo que faz sentido ler depois de "IA desativada para"."""
+    if usuario_com_ia_desativada(usuario.get("id_usuario")):
+        return "a sua conta"
     sem_ia = delegacias_sem_ia()
     if not sem_ia:
         return None
@@ -87,9 +113,9 @@ def bloqueio_ia(usuario: dict, id_inquerito: int | None = None) -> str | None:
     return None
 
 
-def erro_ia_desativada(no_delegacia: str) -> HTTPException:
+def erro_ia_desativada(motivo: str) -> HTTPException:
     """403 padrão do flag — a mesma frase que a tela mostra no lugar do chat."""
-    return HTTPException(status_code=403, detail=f"IA desativada para {no_delegacia}.")
+    return HTTPException(status_code=403, detail=f"IA desativada para {motivo}.")
 
 
 def exigir_ia_ativa(usuario: dict = Depends(exigir_aprovado)) -> dict:

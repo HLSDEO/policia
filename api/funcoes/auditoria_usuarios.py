@@ -24,6 +24,8 @@ ACOES_VALIDAS = {
     "configurar_ia",
     "apagar_ia",
     "alterar_delegacia",
+    "ativar_ia",
+    "desativar_ia",
 }
 
 
@@ -165,6 +167,8 @@ ROTULO_ACAO = {
     "configurar_ia": "Configurar IA própria",
     "apagar_ia": "Remover IA própria",
     "alterar_delegacia": "Alterar delegacia",
+    "ativar_ia": "Reativar IA do usuário",
+    "desativar_ia": "Desativar IA do usuário",
 }
 
 

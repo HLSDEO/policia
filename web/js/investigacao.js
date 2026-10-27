@@ -309,6 +309,10 @@
   // folha com linhas: "Contexto da investigação" do menu Extras
   var ICONE_CONTEXTO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>';
 
+  // caixa com tampa e seta: "Arquivar/Reativar inquérito" do menu Gerência (situação do caso,
+  // não o andamento do processamento)
+  var ICONE_ARQUIVAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
+
   // Fonte única de ícones quando disponível: window.Icones (js/utils/icones.js) tem os mesmos
   // traços para os ícones comuns. Os específicos do caso (Mesa, IA, RIF/SIMBA/IPED/IPEI/IRPF,
   // telefonia, Android/Apple, etc.) continuam locais. O fallback garante a página mesmo se o
@@ -908,6 +912,30 @@
         atualizarTudo(); // recarrega a lista com o novo número
       }).fail(function (xhr) {
         Dialogo.alerta({ titulo: "Erro", mensagem: (xhr.responseJSON && xhr.responseJSON.detail) || "Erro ao renomear o inquérito." });
+      });
+    });
+  }
+
+  function alternarSituacaoInquerito(inq) {
+    var arquivar = inq.tp_situacao !== "arquivado";
+    Dialogo.confirmar({
+      titulo: arquivar ? "Arquivar inquérito" : "Reativar inquérito",
+      mensagem: arquivar
+        ? "Arquivar o inquérito " + inq.nu_inquerito + "? Nada é apagado: o caso segue íntegro e navegável, "
+          + "mas passa a constar como encerrado no filtro \"Arquivados\" das investigações."
+        : "Reativar o inquérito " + inq.nu_inquerito + "? Ele volta a constar como caso ativo.",
+      rotuloOk: arquivar ? "Arquivar" : "Reativar"
+    }).then(function (ok) {
+      if (!ok) return;
+      $.ajax({
+        url: "/api/investigacao/inqueritos/" + inq.id_inquerito + "/situacao",
+        method: "PUT",
+        contentType: "application/json",
+        data: JSON.stringify({ situacao: arquivar ? "arquivado" : "ativo" })
+      }).done(function () {
+        atualizarTudo(); // selo e menu refletem a situação nova
+      }).fail(function (xhr) {
+        Dialogo.alerta({ titulo: "Erro", mensagem: (xhr.responseJSON && xhr.responseJSON.detail) || "Erro ao mudar a situação do inquérito." });
       });
     });
   }
@@ -1955,6 +1983,9 @@
     if (inq.in_caso_inteligencia) {
       $("<span>").addClass("badge badge-aviso").text("CASO DE INTELIGÊNCIA").appendTo($info);
     }
+    if (inq.tp_situacao === "arquivado") {
+      $("<span>").addClass("badge badge-neutro").attr("title", "Inquérito arquivado pelo gestor — o caso segue íntegro e navegável").text("ARQUIVADO").appendTo($info);
+    }
     $("<span>").text(formatarNumero(inq.qt_extracoes) + " extração(ões)").appendTo($info);
     $("<span>")
       .addClass("investigacao-admin")
@@ -2132,6 +2163,13 @@
           html: ICONE_EDITAR + " Delegacia do inquérito",
           title: "Definir ou alterar a delegacia associada a este inquérito",
           onClick: function () { abrirModalDelegacia(inq); }
+        },
+        {
+          html: ICONE_ARQUIVAR + (inq.tp_situacao === "arquivado" ? " Reativar inquérito" : " Arquivar inquérito"),
+          title: inq.tp_situacao === "arquivado"
+            ? "O inquérito volta a constar como caso ativo nas investigações"
+            : "Marca o caso como encerrado: sai do foco da lista (filtro \"Arquivados\"), mas nada é apagado",
+          onClick: function () { alternarSituacaoInquerito(inq); }
         },
         "divisor",
         {

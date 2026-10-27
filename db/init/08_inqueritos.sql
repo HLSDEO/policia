@@ -17,6 +17,11 @@ CREATE TABLE INQ_TB01_INQUERITOS (
     ID_USUARIO_CRIADOR        BIGINT,
     TX_CONTEXTO_INVESTIGACAO  TEXT,
     NO_DELEGACIA              VARCHAR(300),
+    -- Situacao do inquerito em si (nao o andamento do processamento): 'ativo' | 'arquivado'.
+    -- Arquivado e um caso encerrado que sai do foco da listagem mas continua integro e navegavel.
+    -- So o gestor do inquerito (criador ou in_admin) muda - ver rotas/investigacao.py.
+    TP_SITUACAO               VARCHAR(12) NOT NULL DEFAULT 'ativo',
+    CONSTRAINT CK_INQ_TB01_TP_SITUACAO CHECK (TP_SITUACAO IN ('ativo', 'arquivado')),
     CONSTRAINT FK80_INQ_TB01_USR_TB01 FOREIGN KEY (ID_USUARIO_CRIADOR)
         REFERENCES SEGURANCA.USR_TB01_USUARIOS (ID_USUARIO)
 );

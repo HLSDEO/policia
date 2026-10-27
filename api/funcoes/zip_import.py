@@ -85,7 +85,8 @@ def pos_processar_documento(resultado: dict, id_usuario: int | None,
         from funcoes.documentos_utils import _ia_configurada, _tem_padroes_ativos, iniciar_analise_documento
         from funcoes.ia_delegacia import bloqueio_ia
         ia_livre = _ia_configurada(id_usuario) and not bloqueio_ia(
-            {"no_delegacia": no_delegacia_usuario}, id_inquerito=resultado["id_inquerito"])
+            {"no_delegacia": no_delegacia_usuario, "id_usuario": id_usuario},
+            id_inquerito=resultado["id_inquerito"])
         # com a IA bloqueada/desligada ainda vale rodar: o pré-passe determinístico
         # (entidades_auto_utils) persiste sozinho (usar_ia=False)
         if ia_livre or _tem_padroes_ativos():

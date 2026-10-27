@@ -136,7 +136,11 @@
 
   function aplicarEstadoURLNaUI() {
     if (estadoInicialURL.q) $busca.val(estadoInicialURL.q);
-    if (estadoInicialURL.status) $filtroStatus.val(estadoInicialURL.status);
+    // links antigos (?status=andamento|concluido) apontam para o filtro velho de processamento —
+    // ignore em vez de deixar o select sem seleção nenhuma
+    if (estadoInicialURL.status && ["todos", "ativo", "arquivado"].indexOf(estadoInicialURL.status) !== -1) {
+      $filtroStatus.val(estadoInicialURL.status);
+    }
     if (estadoInicialURL.tipo) $filtroTipo.val(estadoInicialURL.tipo);
     if (estadoInicialURL.ordem) $filtroOrdem.val(estadoInicialURL.ordem);
     paginaLista = estadoInicialURL.pagina || 1;
@@ -407,8 +411,8 @@
         var busca = (item.nome_item || "") + " " + (item.delegacia || "") + " " + (item.administrador || "") + " " + (eCaso ? "caso caso de inteligencia" : "inquerito ipl");
         if (!busca.toLowerCase().includes(termo)) return false;
       }
-      if (status === "andamento" && !item.tem_extracao_em_andamento) return false;
-      if (status === "concluido" && item.tem_extracao_em_andamento) return false;
+      if (status === "ativo" && item.tp_situacao === "arquivado") return false;
+      if (status === "arquivado" && item.tp_situacao !== "arquivado") return false;
       if (delegacia && item.delegacia !== delegacia) return false;
       return true;
     });
@@ -531,6 +535,10 @@
     var $idWrap = $("<span>").css({ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }).appendTo($header);
     $("<span>").addClass("inq-id").text("DELEGACIA " + (item.delegacia || "—")).appendTo($idWrap);
     $("<span>").addClass("inq-tipo-badge " + (eCaso ? "caso" : "inquerito")).text(eCaso ? "CASO DE INTELIGÊNCIA" : "INQUÉRITO").appendTo($idWrap);
+    // Selo da situação do caso (o "status" do filtro): arquivado é visível, ativo é o silêncio.
+    if (item.tp_situacao === "arquivado") {
+      $("<span>").addClass("badge badge-neutro").attr("title", "Inquérito arquivado pelo gestor — o caso segue íntegro e navegável").text("ARQUIVADO").appendTo($idWrap);
+    }
 
     var prog = progressoInfo(item);
     var statusClass = item.tem_extracao_em_andamento ? "andamento" : "processado";
@@ -644,6 +652,9 @@
       .html((eCaso ? '<small>CASO</small>' : '<small>IPL</small>') + $("<span>").text(limparIdInquerito(item.nu_inquerito) || "—").html())
       .appendTo($topo);
     $("<span>").addClass("inq-tipo-badge " + (eCaso ? "caso" : "inquerito")).text(eCaso ? "CASO DE INTELIGÊNCIA" : "INQUÉRITO").appendTo($topo);
+    if (item.tp_situacao === "arquivado") {
+      $("<span>").addClass("badge badge-neutro").attr("title", "Inquérito arquivado pelo gestor — o caso segue íntegro e navegável").text("ARQUIVADO").appendTo($topo);
+    }
     var status = item.tem_extracao_em_andamento ? "andamento" : "processado";
     $("<span>").addClass("inq-status " + status).attr("title", prog.texto)
       .html((item.tem_extracao_em_andamento ? ICONE_ANDAMENTO : ICONE_OK) + " " + $("<span>").text(prog.texto).html())
