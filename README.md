@@ -31,12 +31,40 @@ pod reinicia. Para tornar uma mudança permanente, atualize o Secret e faça
 ## Pré-requisitos
 
 - `oc` logado no projeto `pf-policia-dev` (ajuste os labels/namespace no `openshift.yaml` se for outro).
-- `podman` (ou `docker`) com acesso de build aos repositórios upstream (`python:3.12-slim`,
-  `alpine`, `nginx-unprivileged`) e ao `registry.redhat.io` (login para a imagem base do Postgres).
+- Para a **Opção B** (build local): `podman` (ou `docker`) com acesso aos repositórios upstream
+  (`python:3.12-slim`, `alpine`, `nginx-unprivileged`) e ao `registry.redhat.io` (login para a
+  imagem base do Postgres). Na **Opção A** quem baixa tudo é o próprio cluster.
 - StorageClass default no cluster (os PVCs não fixam `storageClassName`). Para `api.replicas > 1`,
   a classe precisa suportar `ReadWriteMany` (NFS/CephFS) — os PVCs estão como `ReadWriteOnce`.
 
 ## 1. Build das imagens
+
+### Opção A — build DENTRO do cluster (recomendada; usa este repositório Git)
+
+`openshift-builds.yaml` define 4 BuildConfigs (strategy Docker, um `dockerfilePath` por
+imagem) + ImageStreams. Cole o arquivo no console (**Developer → Import YAML**) ou:
+
+```bash
+oc apply -f openshift-builds.yaml
+oc start-build analyser-pgbouncer            # comece pelo leve...
+oc start-build analyser-postgres
+oc start-build analyser-web
+oc start-build analyser-api                  # ...e o pesado em paralelo (fila Serial por BC)
+oc get builds -w                             # acompanhe; Logs no console em Builds → <nome>
+```
+
+O build da API baixa torch/transformers (~2 GB) — rode de 10 a 40 min. O `completionDeadlineSeconds`
+do YAML já cobre isso. Os ImageStreams de saída (`analyser-*:latest`) são exatamente os que o
+`openshift.yaml` consome — nada para ajustar.
+
+Se o build do Postgres falhar ao puxar `registry.redhat.io/rhel9/postgresql-16` (cluster sem
+entitlement), edite o BuildConfig `analyser-postgres` e descomente o `buildArgs`
+com `POSTGRES_BASE=quay.io/sclorg/postgresql-16-c9s` (imagem comunitária idêntica, sem login).
+
+Depois de qualquer rebuild: `oc rollout restart deployment/<nome>` — os Deployments puxam por
+tag `:latest` (sem trigger automático de ImageStream).
+
+### Opção B — build local + push (podman/docker na sua máquina)
 
 ```bash
 REG=$(oc registry info)                      # ex.: default-registry.apps.<cluster>...
