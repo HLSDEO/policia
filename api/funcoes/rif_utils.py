@@ -266,95 +266,15 @@ def salvar_rif_enviado(itens, subpasta: str | None = None) -> dict:
     # muda o nome final em data/, não o que veio do navegador)
     pasta_final = pasta_bruta if "rif" in pasta_bruta.lower() else "RIF_" + pasta_bruta
 
-    # Delegacia com nó ativo (docs/no_descentralizado.md): a pasta inteira do RIF vai para a
-    # data() DO NÓ — o central repassa cada arquivo em streaming e não fica com cópia nenhuma
-    # (a mesma regra do upload de documento e do .ufdr).
+    # O central não guarda provas: a pasta inteira do RIF vai para a data() DO NÓ — o central
+    # repassa cada arquivo em streaming e não fica com cópia nenhuma (a mesma regra do upload
+    # de documento e do .ufdr). Sem nó ativo, recusa.
     from funcoes import no_utils
 
     no = no_utils.servidor_ativo_para(subpasta)
-    if no is not None:
-        return _salvar_rif_no(no, itens, subpasta, pasta_bruta, pasta_final, _relativo_seguro)
-
-    base = _subpasta_rif(subpasta)
-    base.mkdir(parents=True, exist_ok=True)
-
-    # mkdir sem parents e sem exist_ok: é a reserva exclusiva do nome — dois uploads simultâneos
-    # da mesma pasta não se sobrescrevem, o segundo ganha sufixo (como em salvar_documento_enviado)
-    alvo = base / pasta_final
-    sufixo = 2
-    while True:
-        try:
-            alvo.mkdir()
-            break
-        except FileExistsError:
-            if sufixo > 999:
-                raise ValueError(f"{pasta_final}: já existem pastas demais com este nome em data/.")
-            alvo = base / f"{pasta_final} ({sufixo})"
-            sufixo += 1
-
-    limite_bytes = limite_upload_bytes()
-    limite_mb = limite_upload_mb()
-    salvos: list[dict] = []
-    falhas: list[str] = []
-    try:
-        for fluxo, nome_relativo in itens:
-            relativo = _relativo_seguro(nome_relativo or "")
-            if not relativo or "/" not in relativo:
-                falhas.append(f"{nome_relativo or '(sem nome)'}: envie a pasta inteira do RIF, não arquivos soltos.")
-                continue
-            partes = relativo.split("/")
-            if partes[0] != pasta_bruta:
-                falhas.append(f"{relativo}: arquivo fora da pasta '{pasta_bruta}' — não foi salvo.")
-                continue
-            nome = partes[-1]
-            if Path(nome).suffix.lower() not in _EXTENSOES_RIF_UPLOAD:
-                falhas.append(f"{nome}: só CSV e PDF entram na pasta do RIF.")
-                continue
-
-            destino = alvo
-            for p in partes[1:-1]:
-                destino = destino / p
-            destino.mkdir(parents=True, exist_ok=True)
-            arquivo_destino = destino / nome
-            # "xb" (criação exclusiva) e não "wb": nunca sobrescrever arquivo de outro upload
-            s = 2
-            while True:
-                try:
-                    handle = open(arquivo_destino, "xb")
-                    break
-                except FileExistsError:
-                    raiz, extensao = Path(nome).stem, Path(nome).suffix
-                    arquivo_destino = destino / f"{raiz} ({s}){extensao}"
-                    s += 1
-
-            total = 0
-            try:
-                with handle:
-                    while True:
-                        bloco = fluxo.read(_BLOCO_UPLOAD)
-                        if not bloco:
-                            break
-                        total += len(bloco)
-                        if total > limite_bytes:
-                            raise ValueError(f"{nome}: maior que o limite de {limite_mb} MB por arquivo.")
-                        handle.write(bloco)
-                if total == 0:
-                    raise ValueError(f"{nome}: arquivo vazio.")
-            except ValueError as exc:
-                arquivo_destino.unlink(missing_ok=True)
-                falhas.append(str(exc))
-                continue
-            salvos.append({"nome": nome, "tamanho_bytes": total})
-    except BaseException:
-        # nada de pasta pela metade em data/: ela apareceria no seletor como um RIF inteiro
-        shutil.rmtree(alvo, ignore_errors=True)
-        raise
-
-    if not salvos:
-        shutil.rmtree(alvo, ignore_errors=True)
-        raise ValueError("; ".join(falhas) if falhas else "Nenhum arquivo CSV/PDF pôde ser salvo.")
-    logger.info("RIF enviado pelo navegador: pasta %s, %s arquivo(s)", alvo.name, len(salvos))
-    return {"pasta": alvo.name, "arquivos": salvos, "falhas": falhas}
+    if no is None:
+        raise ValueError(no_utils.SEM_NO_ATIVO_MSG)
+    return _salvar_rif_no(no, itens, subpasta, pasta_bruta, pasta_final, _relativo_seguro)
 
 
 def _salvar_rif_no(no, itens, subpasta: str | None, pasta_bruta: str, pasta_final: str,

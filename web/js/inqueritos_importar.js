@@ -177,9 +177,9 @@
       arquivos.forEach(function (a) {
         $arquivoSelect.append($("<option>").val(a.nome).text(a.nome + " (" + formatarBytes(a.tamanho_bytes) + ")"));
       });
-    }).fail(function () {
-      $arquivoSelect.empty().append($("<option>").val("").text("Erro ao carregar .ufdr"));
-      $("#modal-arquivo-help").text("Não foi possível listar os arquivos.");
+    }).fail(function (xhr) {
+      $arquivoSelect.empty().append($("<option>").val("").text("Indisponível no central"));
+      $("#modal-arquivo-help").text((xhr && xhr.responseJSON && xhr.responseJSON.detail) || "Não foi possível listar os arquivos.");
     });
   }
   function carregarModalDocumentosDisponiveis() {
@@ -204,12 +204,12 @@
         if (a.eh_zip) rotulo += " [ZIP — expande e importa tudo]";
         return { value: a.nome, text: rotulo };
       }));
-    }).fail(function () {
+    }).fail(function (xhr) {
       if (!tsModalDocumento) return;
       tsModalDocumento.clear(); tsModalDocumento.clearOptions();
-      tsModalDocumento.settings.placeholder = "Erro ao carregar documentos";
+      tsModalDocumento.settings.placeholder = "Indisponível no central";
       tsModalDocumento.inputState();
-      $("#modal-documento-help").text("Não foi possível listar os documentos.");
+      $("#modal-documento-help").text((xhr && xhr.responseJSON && xhr.responseJSON.detail) || "Não foi possível listar os documentos.");
     });
   }
   function carregarModalRifsDisponiveis() {
@@ -234,9 +234,9 @@
         if (partes.length) extra += (extra ? " · " : "") + partes.join(", ");
         $rifSelect.append($("<option>").val(r.pasta).text(r.pasta + (extra ? " (" + extra + ")" : "")));
       });
-    }).fail(function () {
-      $rifSelect.empty().append($("<option>").val("").text("Erro ao carregar RIFs"));
-      $("#modal-rif-help").text("Não foi possível listar as pastas de RIF.");
+    }).fail(function (xhr) {
+      $rifSelect.empty().append($("<option>").val("").text("Indisponível no central"));
+      $("#modal-rif-help").text((xhr && xhr.responseJSON && xhr.responseJSON.detail) || "Não foi possível listar as pastas de RIF.");
     });
   }
   function carregarModalSimbaDisponiveis() {
@@ -252,21 +252,21 @@
       $simbaBtn.prop("disabled", false);
       $("#modal-simba-help").text("");
       arquivos.forEach(function (a) { $simbaSelect.append($("<option>").val(a.nome).text(a.nome + " (" + formatarBytes(a.tamanho_bytes) + ")")); });
-    }).fail(function () {
-      $simbaSelect.empty().append($("<option>").val("").text("Erro ao carregar SIMBA"));
-      $("#modal-simba-help").text("Não foi possível listar os arquivos R304.");
+    }).fail(function (xhr) {
+      $simbaSelect.empty().append($("<option>").val("").text("Indisponível no central"));
+      $("#modal-simba-help").text((xhr && xhr.responseJSON && xhr.responseJSON.detail) || "Não foi possível listar os arquivos R304.");
     });
   }
   function carregarModalIpedDisponiveis() {
     var params = delegaciaParaApi() ? { delegacia: delegaciaParaApi() } : {};
     var pDisponivel = $.getJSON("/api/investigacao/iped-disponivel").done(function (r) {
       if (r.disponivel) return;
-      $ipedSelect.empty().append($("<option>").val("").text("Java indisponível nesta instalação"));
+      $ipedSelect.empty().append($("<option>").val("").text("Indisponível — rodará no nó"));
       $ipedBtn.prop("disabled", true);
-      $("#modal-iped-help").text("O servidor precisa de um JRE para ler casos do IPED — avise o administrador.");
+      $("#modal-iped-help").text(r.motivo || "Importação IPED indisponível neste servidor.");
     }).fail(function () {});
     var pLista = $.getJSON("/api/investigacao/iped-disponiveis", params).done(function (pastas) {
-      if ($("#modal-iped-help").text().indexOf("JRE") !== -1) return;
+      if ($("#modal-iped-help").text().indexOf("central") !== -1) return;
       $ipedSelect.empty();
       if (!pastas.length) {
         $ipedSelect.append($("<option>").val("").text("Nenhuma pasta de caso do IPED em data/" + (delegaciaParaApi() ? " (" + delegaciaAtual + ")" : "")));
@@ -794,7 +794,7 @@
     var pasta = $ipedSelect.val();
     $ipedContaInput.val(""); $ipedContaCampo.addClass("hidden").attr("hidden", "");
     if (!pasta) {
-      $("#modal-iped-help").text($("#modal-iped-help").text().indexOf("JRE") !== -1 ? $("#modal-iped-help").text() : "");
+      $("#modal-iped-help").text($("#modal-iped-help").text().indexOf("central") !== -1 ? $("#modal-iped-help").text() : "");
       $ipedBtn.prop("disabled", $ipedSelect.find("option").length === 1 && $ipedSelect.find("option").first().val() === "");
       ipedDetectando = false; return;
     }

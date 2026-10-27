@@ -6,8 +6,6 @@ qualquer inquérito, e apagava categorias que são configuração global de todo
 confere acesso ao inquérito e a escrita de categoria exige admin.
 """
 
-import threading
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -15,7 +13,6 @@ from funcoes.auth_utils import exigir_admin, exigir_aprovado
 from funcoes import jobs_utils
 from funcoes.classificacao_imagem_utils import (
     alternar_ativo_categoria,
-    classificar_imagens_pendentes,
     criar_categoria,
     excluir_categoria,
     listar_categorias,
@@ -85,30 +82,20 @@ def iniciar_classificacao(payload: ClassificarIn, usuario: dict = Depends(exigir
         if obter_id_inquerito_de_extracao(payload.id_extracao) != payload.id_inquerito:
             raise HTTPException(status_code=404, detail="Extração não encontrada neste inquérito.")
 
-    # nó online + JOBS_NO_ATIVO=tudo → a classificação CLIP roda na estação (o modelo precisa
-    # estar no cache HF do nó — ver docker-compose.no.yml; docs/no_descentralizado.md)
+    # O central não roda CLIP: a classificação é SEMPRE do nó da delegacia (o modelo vive no
+    # cache HF da estação). Sem nó ativo/online, 409 com a causa.
     from funcoes import jobs_no
 
-    no = jobs_no.no_para_job(jobs_utils.TP_CLASSIFICACAO, payload.id_inquerito)
+    no = jobs_no.exigir_no_para_job(jobs_utils.TP_CLASSIFICACAO, payload.id_inquerito)
     try:
         id_job = jobs_utils.criar(
             jobs_utils.TP_CLASSIFICACAO, usuario["id_usuario"],
             id_inquerito=payload.id_inquerito, id_extracao=payload.id_extracao,
             parametros={"batch_size": payload.batch_size, "max_imagens": payload.max_imagens},
-            pesado=not no, id_servidor=no["id_servidor"] if no else None,
+            pesado=False, id_servidor=no["id_servidor"],
         )
     except jobs_utils.JobOcupado as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
-    if no is not None:
-        return {"ok": True, "id_job": id_job,
-                "mensagem": f"Classificação iniciada no servidor {no['no_servidor']}."}
-
-    threading.Thread(
-        target=classificar_imagens_pendentes,
-        args=(id_job, payload.id_inquerito, payload.id_extracao, payload.batch_size,
-              payload.max_imagens),
-        daemon=True,
-    ).start()
-
-    return {"ok": True, "id_job": id_job, "mensagem": "Classificação iniciada em background."}
+    return {"ok": True, "id_job": id_job,
+            "mensagem": f"Classificação iniciada no servidor {no['no_servidor']}."}

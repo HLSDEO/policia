@@ -410,69 +410,28 @@ def salvar_documento_enviado(fluxo, nome_original: str, subpasta: str | None = N
         raise ValueError("Nome de arquivo inválido.")
     extensao = Path(nome).suffix.lower()
 
-    # Delegacia com nó ativo (docs/no_descentralizado.md): o documento vai para a pasta DA
-    # DELEGACIA — o central só repassa o corpo em streaming. O ZIP é expandido NO NÓ pela mesma
-    # _salvar_documento_zip (mesmo código, disco certo, mesmas travas anti-zip-bomb); o arquivo
-    # único obedece ao mesmo limite vigente, imposto durante o streaming pelo próprio nó.
+    # O central NÃO guarda documentos: o corpo é repassado em streaming para a pasta DA DELEGACIA
+    # no NÓ (docs/no_descentralizado.md). O ZIP é expandido NO NÓ pela mesma _salvar_documento_zip
+    # (mesmo código, disco certo, mesmas travas anti-zip-bomb); o arquivo único obedece ao mesmo
+    # limite vigente, imposto durante o streaming pelo próprio nó. Sem nó ativo, recusa.
     from funcoes import no_utils
 
     no = no_utils.servidor_ativo_para(subpasta)
-    if no is not None:
-        from funcoes import no_ponte
+    if no is None:
+        raise ValueError(no_utils.SEM_NO_ATIVO_MSG)
+    from funcoes import no_ponte
 
-        try:
-            if extensao == ".zip":
-                return no_ponte.enviar_zip(no, fluxo, subpasta, nome)
-            if not _tipo_suportado(extensao):
-                raise ValueError(f"{nome}: tipo não suportado — envie PDF, CSV, XLS, XLSX, DOCX, "
-                                 "TXT, HTML, JPG/PNG ou ZIP.")
-            salvo = no_ponte.enviar_arquivo(no, fluxo, f"{subpasta}/{nome}" if subpasta else nome,
-                                            max_bytes=limite_upload_bytes())
-            return [salvo]
-        except no_ponte.NoIndisponivel as exc:
-            raise ValueError(str(exc)) from exc
-
-    if extensao == ".zip":
-        return _salvar_documento_zip(fluxo, nome, subpasta)
-    if not _tipo_suportado(extensao):
-        raise ValueError(f"{nome}: tipo não suportado — envie PDF, CSV, XLS, XLSX, DOCX, TXT, "
-                         "HTML, JPG/PNG ou ZIP.")
-
-    pasta = _subpasta_docs(subpasta)
-    pasta.mkdir(parents=True, exist_ok=True)
-    alvo, arquivo_destino = _abrir_destino_unico(pasta, nome)
-
-    limite_bytes = limite_upload_bytes()
-    limite_mb = limite_upload_mb()
-    total = 0
     try:
-        with arquivo_destino:
-            while True:
-                bloco = fluxo.read(_BLOCO_UPLOAD)
-                if not bloco:
-                    break
-                total += len(bloco)
-                if total > limite_bytes:
-                    raise ValueError(f"{nome}: maior que o limite de {limite_mb} MB por arquivo.")
-                arquivo_destino.write(bloco)
-        if total == 0:
-            raise ValueError(f"{nome}: arquivo vazio.")
-        # a extensão manda, o conteúdo obedece: .exe renomeado para .pdf morre aqui, com nome,
-        # e não como "falha na extração" genérica dias depois (ver _ASSINATURAS)
-        if not _assinatura_bate(alvo):
-            raise ValueError(f"{nome}: o conteúdo não bate com a extensão — não é um arquivo "
-                             f"{extensao} de verdade.")
-    except BaseException:
-        # nada de meio-arquivo em data/: ele apareceria na listagem como se estivesse inteiro, e
-        # a extração de texto falharia depois, longe daqui
-        alvo.unlink(missing_ok=True)
-        raise
-
-    renomeado = alvo.name != nome
-    if renomeado:
-        logger.info("Documento já existia com o nome %s — gravado como %s", nome, alvo.name)
-    logger.info("Documento enviado pelo navegador: %s (%s bytes)", alvo, total)
-    return [{"nome": alvo.name, "tamanho_bytes": total, "renomeado": renomeado}]
+        if extensao == ".zip":
+            return no_ponte.enviar_zip(no, fluxo, subpasta, nome)
+        if not _tipo_suportado(extensao):
+            raise ValueError(f"{nome}: tipo não suportado — envie PDF, CSV, XLS, XLSX, DOCX, "
+                             "TXT, HTML, JPG/PNG ou ZIP.")
+        salvo = no_ponte.enviar_arquivo(no, fluxo, f"{subpasta}/{nome}" if subpasta else nome,
+                                        max_bytes=limite_upload_bytes())
+        return [salvo]
+    except no_ponte.NoIndisponivel as exc:
+        raise ValueError(str(exc)) from exc
 
 
 # =====================================================================
@@ -1110,66 +1069,39 @@ def expandir_zip_para_importacao(nome_arquivo: str, subpasta: str | None = None,
     `finalizar(numero_inquerito)` move o ZIP original para OUTROS do inquérito (best-effort,
     no nó quando ele mora lá) para sumir do seletor, sem virar documento. Levanta ValueError
     (ZIP inválido ou sem nada aproveitável) ou FileNotFoundError."""
-    from funcoes.organizacao_arquivos import CATEGORIA_OUTROS, organizar
+    # o central não descompacta nem parseia: o ZIP mora no nó da delegacia, a expansão roda LÁ
+    # (POST /no/expandir-zip, mesmo código, disco certo) e os arquivos de dentro são anexados
+    # um a um pelo caminho de nó (parse remoto).
+    from funcoes import no_ponte, no_utils
+
+    no = no_utils.servidor_ativo_para(delegacia or subpasta)
+    if no is None:
+        raise ValueError(no_utils.SEM_NO_ATIVO_MSG)
 
     caminho = _subpasta_docs(subpasta) / nome_arquivo
-    no = None
-    id_servidor_zip = None
-    if caminho.is_file():
-        expansao = expandir_zip_em_disco(caminho, subpasta)
-        arquivos = [a["nome"] for a in expansao["arquivos"]]
-        ignorados = expansao["ignorados"]
-        truncado = expansao["truncado"]
-    else:
-        # ZIP mora no nó da delegacia: a expansão roda LÁ (mesmo código, disco certo) e os
-        # arquivos de dentro são anexados um a um pelo caminho de nó (parse remoto).
-        no = _no_com_arquivo(caminho, delegacia)
-        if no is None:
-            if not _puxar_documento_do_no(caminho, delegacia):
-                raise FileNotFoundError(nome_arquivo)
-            expansao = expandir_zip_em_disco(caminho, subpasta)
-            arquivos = [a["nome"] for a in expansao["arquivos"]]
-            ignorados = expansao["ignorados"]
-            truncado = expansao["truncado"]
-            no = None
-        else:
-            from funcoes import no_ponte
-
-            relativo = caminho.relative_to(PASTA_DADOS).as_posix()
-            try:
-                expansao = no_ponte.expandir_zip(no, relativo)
-            except no_ponte.NoIndisponivel:
-                if not _puxar_documento_do_no(caminho, delegacia):
-                    raise FileNotFoundError(nome_arquivo)
-                expansao = expandir_zip_em_disco(caminho, subpasta)
-                arquivos = [a["nome"] for a in expansao["arquivos"]]
-                ignorados = expansao["ignorados"]
-                truncado = expansao["truncado"]
-                no = None
-            else:
-                arquivos = [a["nome"] for a in (expansao.get("arquivos") or [])]
-                ignorados = int(expansao.get("ignorados") or 0)
-                truncado = bool(expansao.get("truncado"))
-                id_servidor_zip = no["id_servidor"]
-                if not arquivos:
-                    raise ValueError(
-                        f"{nome_arquivo}: nenhum arquivo suportado dentro do ZIP — ele deve conter "
-                        "PDF, CSV, XLS, XLSX, DOCX, TXT, HTML, JPG ou PNG."
-                    )
+    relativo = caminho.relative_to(PASTA_DADOS).as_posix()
+    try:
+        if not no_ponte.arquivo_existe(no, relativo):
+            raise FileNotFoundError(nome_arquivo)
+        expansao = no_ponte.expandir_zip(no, relativo)
+    except no_ponte.NoIndisponivel as exc:
+        raise ValueError(str(exc)) from exc
+    arquivos = [a["nome"] for a in (expansao.get("arquivos") or [])]
+    ignorados = int(expansao.get("ignorados") or 0)
+    truncado = bool(expansao.get("truncado"))
+    if not arquivos:
+        raise ValueError(
+            f"{nome_arquivo}: nenhum arquivo suportado dentro do ZIP — ele deve conter "
+            "PDF, CSV, XLS, XLSX, DOCX, TXT, HTML, JPG ou PNG."
+        )
 
     def _finalizar(numero_inquerito: str | None) -> None:
         # o ZIP sai da pasta de entrega como qualquer documento (para sumir do seletor), mas
         # sem virar linha em INQ_TB04 — só o conteúdo dele é documento
         try:
-            if id_servidor_zip and no is not None:
-                from funcoes import no_ponte
-
-                relativo_zip = caminho.relative_to(PASTA_DADOS).as_posix()
-                no_ponte.organizar(no, relativo_zip, numero_inquerito or "", "OUTROS")
-            elif caminho.is_file():
-                organizar(caminho, numero_inquerito, CATEGORIA_OUTROS)
+            no_ponte.organizar(no, relativo, numero_inquerito or "", "OUTROS")
         except Exception:
-            logger.exception("Falha ao organizar o ZIP %s (best-effort)", nome_arquivo)
+            logger.exception("Falha ao organizar o ZIP %s no nó (best-effort)", nome_arquivo)
 
     return {"arquivos": arquivos, "ignorados": ignorados, "truncado": truncado,
             "finalizar": _finalizar}
@@ -1192,44 +1124,35 @@ def anexar_documento_inquerito(nome_arquivo: str, numero_inquerito: str, id_usua
     if eh_zip(nome_arquivo):
         raise ValueError("ZIP é importado em fila (job) — use a importação de Arquivo genérico.")
     caminho = _subpasta_docs(subpasta) / nome_arquivo
-    id_servidor = None
-    no = None
-    if caminho.is_file():
-        texto, erro = extrair_texto_documento(caminho)
-    else:
-        # delegacia com nó: o arquivo mora na estação (upload repassado ou solto na pasta lá).
-        # O texto é extraído NO NÓ (POST /no/parse) e o arquivo nunca é espelhado para cá — a
-        # prova fica lá, o banco guarda o texto e ID_SERVIDOR diz de onde reler quando preciso.
-        no = _no_com_arquivo(caminho, delegacia)
-        if no is not None:
-            from funcoes import no_ponte
-            id_servidor = no["id_servidor"]
-            relativo = caminho.relative_to(PASTA_DADOS).as_posix()
-            try:
-                parse = no_ponte.parse_documento(no, relativo)
-                texto, erro = parse.get("texto"), parse.get("erro")
-            except no_ponte.NoIndisponivel:
-                # o nó caiu no meio do caminho: último recurso é o espelho antigo (copia p/ cá)
-                id_servidor, no = None, None
-                if not _puxar_documento_do_no(caminho, delegacia):
-                    raise FileNotFoundError(nome_arquivo)
-                texto, erro = extrair_texto_documento(caminho)
-        elif _puxar_documento_do_no(caminho, delegacia):
-            # nó sem o arquivo (ou pasta RIF/SIMBA): espelho como sempre — o arquivo vem p/ cá
-            texto, erro = extrair_texto_documento(caminho)
-        else:
+    # o central NÃO processa: o arquivo mora na estação (upload repassado ou solto na pasta lá)
+    # e o texto é extraído NO NÓ (POST /no/parse) — o arquivo nunca é espelhado para cá para
+    # ser parseado. A prova fica lá, o banco guarda o texto e ID_SERVIDOR diz de onde reler.
+    from funcoes import no_utils
+
+    no = no_utils.servidor_ativo_para(delegacia or subpasta)
+    if no is None:
+        raise ValueError(no_utils.SEM_NO_ATIVO_MSG)
+    from funcoes import no_ponte
+
+    id_servidor = no["id_servidor"]
+    relativo = caminho.relative_to(PASTA_DADOS).as_posix()
+    try:
+        if not no_ponte.arquivo_existe(no, relativo):
             raise FileNotFoundError(nome_arquivo)
+        parse = no_ponte.parse_documento(no, relativo)
+        texto, erro = parse.get("texto"), parse.get("erro")
+    except no_ponte.NoIndisponivel as exc:
+        raise ValueError(str(exc)) from exc
 
     # Hash do arquivo original (cadeia de custódia — ver db/migracoes/0044_documento_hashes.sql).
-    # Só quando o arquivo está em disco AQUI: documento que mora num NÓ (id_servidor) nunca é
-    # espelhado, e o central não tem como hashear o que não tem. Best-effort: hash indisponível
-    # não pode derrubar a anexação — o card diz "hash ainda não calculado" em vez de inventar.
+    # O arquivo mora no NÓ: o hash é calculado LÁ (POST /no/hash), sem mover os bytes.
+    # Best-effort: hash indisponível não pode derrubar a anexação — o card diz "hash ainda não
+    # calculado" em vez de inventar.
     hashes = None
-    if id_servidor is None and caminho.is_file():
-        try:
-            hashes = calcular_hashes_arquivo(caminho)
-        except OSError:
-            logger.exception("Falha ao calcular o hash de %s (best-effort)", nome_arquivo)
+    try:
+        hashes = no_ponte.calcular_hashes(no, relativo)
+    except Exception:
+        logger.warning("Falha ao calcular o hash de %s no nó (best-effort)", nome_arquivo)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -1262,13 +1185,10 @@ def anexar_documento_inquerito(nome_arquivo: str, numero_inquerito: str, id_usua
         conn.commit()
 
     # texto já extraído: o documento sai da pasta de entrega da delegacia e vai para
-    # data/<delegacia>/<inquérito>/OUTROS/ — NO NÓ quando ele mora lá (o nó arruma a própria
-    # pasta; o arquivo não atravessa a WAN). O caminho novo volta em no_arquivo porque a rota
-    # ainda passa o arquivo adiante (IPL e IRPF leem o PDF de novo, ver rotas/investigacao.py).
-    if id_servidor:
-        no_arquivo_final = _organizar_documento_no(id_documento, no, relativo, numero_inquerito)
-    else:
-        no_arquivo_final = _organizar_documento(id_documento, caminho, numero_inquerito) or nome_arquivo
+    # data/<delegacia>/<inquérito>/OUTROS/ — NO NÓ (o nó arruma a própria pasta; o arquivo nunca
+    # atravessa a WAN). O caminho novo volta em no_arquivo porque a rota ainda passa o arquivo
+    # adiante (IPL e IRPF leem o PDF de novo, ver rotas/investigacao.py).
+    no_arquivo_final = _organizar_documento_no(id_documento, no, relativo, numero_inquerito)
     # nu_inquerito volta na resposta para o cliente fixar o caso GERADO nos arquivos seguintes
     # de um lote (caso de inteligência: o 1º POST cria o CASO-AAAA.NNNN, os demais precisam
     # entrar nele — sem isto, cada arquivo do lote criava um caso novo)

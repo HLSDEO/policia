@@ -155,58 +155,14 @@ def salvar_simba_enviado(fluxo, nome_original: str, subpasta: str | None = None)
     if not _RE_R304.search(nome):
         nome = "R304_" + nome
 
-    # Delegacia com nó ativo (docs/no_descentralizado.md): o R304 vai para a data() DO NÓ — o
-    # central só faz a ponte, sem ficar com cópia da prova.
+    # O central não guarda provas: o R304 vai para a data() DO NÓ — o central só faz a ponte,
+    # sem ficar com cópia. Sem nó ativo, recusa.
     from funcoes import no_utils
 
     no = no_utils.servidor_ativo_para(subpasta)
-    if no is not None:
-        return _salvar_simba_no(no, fluxo, nome, subpasta)
-
-    pasta = _subpasta_simba(subpasta)
-    pasta.mkdir(parents=True, exist_ok=True)
-
-    # "xb" (criação exclusiva) e não "wb": dois investigadores enviando o mesmo nome ao mesmo
-    # tempo seria um sobrescrevendo a prova do outro. Quem chega depois ganha sufixo, como em
-    # organizacao_arquivos.destino().
-    extensao = Path(nome).suffix
-    raiz = nome[: len(nome) - len(extensao)]
-    alvo = pasta / nome
-    sufixo = 2
-    while True:
-        try:
-            arquivo_destino = open(alvo, "xb")
-            break
-        except FileExistsError:
-            if sufixo > 999:
-                raise ValueError(f"{nome}: já existem arquivos demais com este nome em data/.")
-            alvo = pasta / f"{raiz} ({sufixo}){extensao}"
-            sufixo += 1
-
-    limite_bytes = limite_upload_bytes()
-    limite_mb = limite_upload_mb()
-    total = 0
-    try:
-        with arquivo_destino:
-            while True:
-                bloco = fluxo.read(_BLOCO_UPLOAD)
-                if not bloco:
-                    break
-                total += len(bloco)
-                if total > limite_bytes:
-                    raise ValueError(f"{nome}: maior que o limite de {limite_mb} MB por arquivo.")
-                arquivo_destino.write(bloco)
-        if total == 0:
-            raise ValueError(f"{nome}: arquivo vazio.")
-        validar_cabecalho(alvo)
-    except BaseException:
-        # nada de meio-arquivo em data/: ele apareceria na listagem como se estivesse inteiro, e
-        # a importação falharia depois, longe daqui
-        alvo.unlink(missing_ok=True)
-        raise
-
-    logger.info("R304 do SIMBA enviado pelo navegador: %s (%s bytes)", alvo, total)
-    return {"nome": alvo.name, "tamanho_bytes": total}
+    if no is None:
+        raise ValueError(no_utils.SEM_NO_ATIVO_MSG)
+    return _salvar_simba_no(no, fluxo, nome, subpasta)
 
 
 def _salvar_simba_no(no, fluxo, nome: str, subpasta: str | None) -> dict:

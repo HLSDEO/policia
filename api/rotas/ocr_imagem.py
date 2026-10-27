@@ -13,8 +13,6 @@ Progresso, cancelamento e "já existe um em andamento" saíram daqui: vivem na t
 analistas de inquéritos diferentes rodam OCR ao mesmo tempo — antes o segundo levava 409.
 """
 
-import threading
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -28,7 +26,6 @@ from funcoes.investigacao_utils import (
 from funcoes.ocr_utils import (
     ocr_disponivel,
     ocr_imagem_especifica,
-    ocr_imagens_pendentes,
     resetar_ocr_imagens,
     status_ocr_extracao,
 )
@@ -66,40 +63,25 @@ def iniciar_ocr(payload: OcrIn, usuario: dict = Depends(exigir_aprovado)):
         if obter_id_inquerito_de_extracao(payload.id_extracao) != payload.id_inquerito:
             raise HTTPException(status_code=404, detail="Extração não encontrada neste inquérito.")
 
-    if not ocr_disponivel():
-        raise HTTPException(
-            status_code=503,
-            detail="OCR indisponível: sem Tesseract instalado (modo local) e sem URL/modelo de API de visão configurados (modo api).",
-        )
-
-    # delegacia com nó online + JOBS_NO_ATIVO=ocr|tudo → o job NASCE para o nó e nenhuma thread
-    # sobe aqui: a CPU da estação é quem reconhece as imagens que já estão no disco dela
-    # (funcoes/jobs_no.py + funcoes/no_jobs.py; docs/no_descentralizado.md "jobs no nó")
+    # O central não roda Tesseract: o OCR é SEMPRE do nó da delegacia (a CPU da estação
+    # reconhece as imagens que já estão no disco dela — funcoes/jobs_no.py; docs/
+    # no_descentralizado.md "jobs no nó"). Sem nó ativo/online, 409 com a causa.
     from funcoes import jobs_no
 
-    no = jobs_no.no_para_job(jobs_utils.TP_OCR, payload.id_inquerito)
+    no = jobs_no.exigir_no_para_job(jobs_utils.TP_OCR, payload.id_inquerito)
     try:
         id_job = jobs_utils.criar(
             jobs_utils.TP_OCR, usuario["id_usuario"],
             id_inquerito=payload.id_inquerito, id_extracao=payload.id_extracao,
             parametros={"lote": payload.lote, "max_imagens": payload.max_imagens},
-            pesado=not no, id_servidor=no["id_servidor"] if no else None,
+            pesado=False, id_servidor=no["id_servidor"],
         )
     except jobs_utils.JobOcupado as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
-    if no is not None:
-        return {"ok": True, "id_job": id_job,
-                "mensagem": f"OCR iniciado no servidor {no['no_servidor']} (extração na "
-                            "delegacia processa na própria estação)."}
-
-    threading.Thread(
-        target=ocr_imagens_pendentes,
-        args=(id_job, payload.id_inquerito, payload.id_extracao, payload.lote, payload.max_imagens),
-        daemon=True,
-    ).start()
-
-    return {"ok": True, "id_job": id_job, "mensagem": "OCR iniciado em background."}
+    return {"ok": True, "id_job": id_job,
+            "mensagem": f"OCR iniciado no servidor {no['no_servidor']} (extração na "
+                        "delegacia processa na própria estação)."}
 
 
 class OcrEspecificoIn(BaseModel):
@@ -115,7 +97,8 @@ def ocr_especifico(payload: OcrEspecificoIn, usuario: dict = Depends(exigir_apro
     if not ocr_disponivel():
         raise HTTPException(
             status_code=503,
-            detail="OCR indisponível: sem Tesseract instalado (modo local) e sem URL/modelo de API de visão configurados (modo api).",
+            detail="OCR sob demanda indisponível: o central não tem Tesseract — use o job de OCR "
+                   "(roda no servidor da delegacia) ou configure a API de visão em Configurações.",
         )
 
     try:

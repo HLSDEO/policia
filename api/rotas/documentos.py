@@ -25,15 +25,15 @@ def prompts_documento(usuario: dict = Depends(exigir_aprovado)):
 
 @router.get("/api/documentos/arquivos")
 def arquivos(usuario: dict = Depends(exigir_aprovado), delegacia: str | None = None):
-    """Lista os arquivos de data/ que não são .ufdr, para o seletor da tela. Se a delegacia tem
-    nó ativo, a lista vem da pasta DO NÓ (é lá que os arquivos dela estão); senão, do central."""
+    """Lista os arquivos da delegacia que não são .ufdr, para o seletor da tela — a pasta mora
+    no NÓ. Sem nó ativo não há lista: o central não importa (409 com a causa)."""
     from funcoes import no_utils
     from funcoes.investigacao_utils import delegacia_permitida
     subpasta = delegacia_permitida(delegacia, usuario)
     remotos = no_utils.listagem_remota(subpasta, subpasta, "diversos")
-    if remotos is not None:
-        return remotos
-    return listar_arquivos_diversos(subpasta)
+    if remotos is None:
+        raise HTTPException(status_code=409, detail=no_utils.SEM_NO_ATIVO_MSG)
+    return remotos
 
 
 @router.get("/api/documentos/upload/limite")

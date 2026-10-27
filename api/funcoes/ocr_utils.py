@@ -19,7 +19,6 @@ import urllib.request
 import zipfile
 from io import BytesIO
 
-import pytesseract
 from PIL import Image as PILImage
 
 from funcoes import jobs_pesados, jobs_utils, ufdr_zip
@@ -73,9 +72,12 @@ def ocr_disponivel() -> bool:
     cfg = _config_ocr()
     if cfg["mode"] == "api":
         return bool(cfg.get("apiUrl") and cfg.get("model"))
+    # o central não embarca mais o Tesseract (o job de OCR roda no nó); no modo local só
+    # funciona na estação ou em instalação que tenha o binário à mão
     try:
-        pytesseract.get_tesseract_version()
-        return True
+        import shutil
+
+        return shutil.which("tesseract") is not None
     except Exception:
         return False
 
@@ -128,6 +130,8 @@ def _ocr_imagem(dados: bytes, idioma: str, config: str) -> str | None:
     """Roda o OCR num binário de imagem. HEIC do iPhone funciona pelo pillow-heif registrado no
     import de investigacao_utils. Detecta e corrige orientação usando EXIF antes do OCR.
     Devolve None quando não há texto legível."""
+    import pytesseract
+
     img = PILImage.open(BytesIO(dados))
 
     # Corrige a orientação da imagem se estiver rotacionada

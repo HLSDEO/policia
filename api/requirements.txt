@@ -2,7 +2,6 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 psycopg[binary]==3.2.3
 psycopg-pool==3.2.3
-faster-whisper==1.0.3
 requests==2.32.3
 bcrypt==4.2.0
 Pillow==10.4.0
@@ -14,11 +13,12 @@ openpyxl==3.1.5
 # TIM manda .xls binário de verdade, que é o que o xlrd resolve.
 xlrd==2.0.2
 python-docx==1.1.2
-transformers==4.45.2
-torch==2.5.1
+# torch/transformers/faster-whisper/pytesseract NÃO vão aqui: os modelos (CLIP, whisper,
+# Tesseract, embeddings) vivem no nó da delegacia — o central navega e reproduz resultados
+# (docs/no_descentralizado.md). O numpy fica: a comparação facial final é uma multiplicação
+# de matriz no central (funcoes/jobs_no.py::_facial_finalizar).
 numpy==1.26.4
 python-multipart==0.0.12
-pytesseract==0.3.13
 # leitura de shapefile (.shp/.dbf) e reprojeção para WGS 84 das camadas geoespaciais do mapa
 # de localizações — funcoes/geoespacial_utils.py. O pyproj traz o PROJ embutido na wheel.
 pyshp==2.3.1

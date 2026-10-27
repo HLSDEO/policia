@@ -2130,10 +2130,8 @@ def processar_texto_em_imagens(
         return {"erro": ("Diga o que processar: 'ids_arquivos' (de buscar_arquivos_dispositivo) ou um "
                          "recorte por 'termo'/'inicio'/'fim'/'id_extracao'. Esta ferramenta não varre "
                          "o corpus inteiro — para isso existe o botão da tela Arquivos.")}
-    if not ocr_utils.ocr_disponivel():
-        return {"erro": ("OCR indisponível no servidor (sem Tesseract local e sem API de visão "
-                         "configurada). Informe o administrador — não há o que processar agora.")}
-
+    # o central não roda Tesseract: a seleção da IA vira job OCR NO NÓ da delegacia (o plano
+    # roda na estação, sobre o disco dela). Sem nó ativo/online, a ferramenta explica.
     try:
         inicio = _parse_data_ocr(inicio, "inicio")
         fim = _parse_data_ocr(fim, "fim")
@@ -2161,12 +2159,20 @@ def processar_texto_em_imagens(
     extracao_job = id_extracao if id_extracao is not None else (
         selecao["extracoes"][0] if len(selecao["extracoes"]) == 1 else None
     )
+    # o reconhecimento roda no nó da delegacia: a lista de ids resolvida acima desce no job e o
+    # plano (jobs_no._plano_ocr) serve a estação com exatamente estas imagens
+    from funcoes import jobs_no
+
+    no = jobs_no.exigir_no_para_job(jobs_utils.TP_OCR_SELECAO, id_inquerito)
+    ids_resolvidos = [int(id_arquivo) for _, itens in selecao["grupos"]
+                      for id_arquivo, _ in itens]
     try:
         novo_job = jobs_utils.criar(
             jobs_utils.TP_OCR_SELECAO, id_usuario, id_inquerito=id_inquerito,
             id_extracao=extracao_job,
+            pesado=False, id_servidor=no["id_servidor"],
             parametros={
-                "ids_arquivos": list(ids_arquivos)[:_OCR_SELECAO_LIMITE_MAX] if ids_arquivos else None,
+                "ids_arquivos": ids_resolvidos,
                 "termo": (termo or "").strip() or None,
                 "inicio": inicio, "fim": fim, "id_extracao": extracao_job,
                 "limite": selecao["limite"],
@@ -2181,12 +2187,6 @@ def processar_texto_em_imagens(
             "aviso": "Já há uma seleção de OCR em andamento neste inquérito — acompanhe pelo id_job "
                      "dela (últimos jobs aparecem na tela Arquivos) ou aguarde terminar.",
         }
-
-    threading.Thread(
-        target=ocr_utils.ocr_imagens_selecionadas,
-        args=(novo_job, selecao["grupos"]),
-        daemon=True,
-    ).start()
     # corredor memória→worker: o turno grava este id_job em CO_JOBS da resposta, e o cartão de
     # progresso aparece na bolha (e na tela Arquivos) mesmo depois de o turno encerrar
     ia_jobs_turno.registrar(id_processamento, novo_job, jobs_utils.TP_OCR_SELECAO, id_extracao=extracao_job)

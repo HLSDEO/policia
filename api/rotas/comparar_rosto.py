@@ -7,7 +7,6 @@ from funcoes.auth_utils import exigir_aprovado
 from funcoes import jobs_utils
 from funcoes.comparar_rosto_utils import (
     extracao_pertence_inquerito,
-    iniciar_comparacao,
     obter_origem_arquivo,
 )
 from funcoes.investigacao_utils import (
@@ -59,43 +58,27 @@ def comparar_rosto_route(
     # comparação com a multiplicação de matriz quando os vetores voltam
     from funcoes import jobs_no
 
-    no = jobs_no.no_para_job(jobs_utils.TP_COMPARACAO_FACIAL, id_inquerito)
+    no = jobs_no.exigir_no_para_job(jobs_utils.TP_COMPARACAO_FACIAL, id_inquerito)
     try:
         id_job = jobs_utils.criar(
             jobs_utils.TP_COMPARACAO_FACIAL, usuario["id_usuario"],
             id_inquerito=id_inquerito, id_extracao=extracao,
             parametros={"limite": min(limite, 100), "extracao": extracao},
-            pesado=not no, id_servidor=no["id_servidor"] if no else None,
+            pesado=False, id_servidor=no["id_servidor"],
         )
     except jobs_utils.JobOcupado as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
-    if no is not None:
-        try:
-            jobs_no.guardar_referencia(id_job, dados)
-        except OSError as exc:
-            jobs_utils.falhar(id_job, f"não consegui guardar a referência para o nó: {exc}")
-            raise HTTPException(status_code=500,
-                                detail="Erro interno ao processar a comparação.") from exc
-        return {"ok": True, "id_job": id_job,
-                "mensagem": f"Comparação iniciada no servidor {no['no_servidor']}."}
-
     try:
-        iniciar_comparacao(
-            id_job=id_job,
-            id_inquerito=id_inquerito,
-            imagem_upload_bytes=dados,
-            limite=min(limite, 100),
-            id_extracao=extracao,
-        )
-    except Exception:
-        logger.exception("Erro ao iniciar comparação de rostos")
-        jobs_utils.falhar(id_job, "Falha ao iniciar a comparação.")
-        raise HTTPException(status_code=500, detail="Erro interno ao processar a comparação.")
-
+        jobs_no.guardar_referencia(id_job, dados)
+    except OSError as exc:
+        jobs_utils.falhar(id_job, f"não consegui guardar a referência para o nó: {exc}")
+        raise HTTPException(status_code=500,
+                            detail="Erro interno ao processar a comparação.") from exc
     # o front acompanha por GET /api/investigacao/jobs/{id_job} e lê os rostos parecidos em
     # tx_resultado.matches quando o job conclui
-    return {"ok": True, "id_job": id_job}
+    return {"ok": True, "id_job": id_job,
+            "mensagem": f"Comparação iniciada no servidor {no['no_servidor']}."}
 
 
 @router.get("/api/investigacao/comparar-rosto/arquivo/{id_arquivo}/preview")

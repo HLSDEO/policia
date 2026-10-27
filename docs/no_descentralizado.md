@@ -88,23 +88,27 @@ nenhum.
 
 ## O que muda no fluxo quando a delegacia tem nó
 
-Tudo parte de uma pergunta — `no_utils.servidor_ativo_para(delegacia)` — e com ela vazia (sem
-nó, ou nó inativo) cada fluxo abaixo é exatamente o de sempre:
+Tudo parte de uma pergunta — `no_utils.servidor_ativo_para(delegacia)` — e este repositório é o
+**CENTRAL PURO**: ele não processa importação nenhuma. Sem nó ativo/online para a delegacia, cada
+fluxo abaixo é **recusado** (409 com `no_utils.SEM_NO_ATIVO_MSG` nas rotas, `ValueError` nos
+utils) — não existe mais caminho local de data/, Tesseract, faster-whisper, CLIP, JRE ou Ollama
+na imagem do central. Os modelos e os discos vivem no nó (outro repositório, com o código de
+`PAPEL=no`).
 
-A delegacia também manda: a coluna **`IN_NO_ATIVA`** (checkbox **"Usa o Nó"** na tela
-Administração → Delegacias) desliga o caminho remoto inteiro sem descadastrar o nó — com ela
-desligada o central finge que o nó não existe e continua importando/extraindo pela **própria**
-pasta `data/`, mesmo com o nó registrado e online. Extrações que já *nasceram* no nó continuam
-sendo lidas por ele (é o `ID_SERVIDOR` da linha que manda, não a flag).
+A delegacia também tem a coluna **`IN_NO_ATIVA`** (checkbox **"Usa o Nó"** na tela
+Administração → Delegacias): com ela desligada o central finge que o nó não existe — e como o
+central não processa nada, as importações da delegacia ficam **indisponíveis** até religar.
+Extrações que já *nasceram* no nó continuam sendo lidas por ele (é o `ID_SERVIDOR` da linha que
+manda, não a flag).
 
 1. **Seletores de arquivo** (`GET /api/investigacao/arquivos`, `GET /api/documentos/arquivos`):
-   a listagem vem da pasta do nó (`GET /no/listar`). O usuário escolhe o arquivo que está na
-   própria delegacia, sem saber disso.
+   a listagem vem da pasta do nó (`GET /no/listar`). Sem nó ativo a rota devolve **409** com o
+   motivo, e o seletor da tela mostra o texto do servidor ("Indisponível no central").
 2. **Extração `.ufdr` (`POST /api/investigacao/extrair`) — o NÓ é o operador**: a linha nasce com
    `INQ_TB02_EXTRACOES.ID_SERVIDOR` preenchido (snapshot — trocar o nó da delegacia depois não
    reaponta extrações antigas). Na hora de processar o despachante **não abre o arquivo**: chama
-   `POST /no/extrair` e sai da frente. O nó roda a pipeline REAL na CPU da estação
-   (`investigacao_utils._processar_extracao` em modo entrega, `funcoes/no_extracao.py`) e devolve
+   `POST /no/extrair` e sai da frente. O nó roda a pipeline REAL na CPU da estação (código do
+   repositório do nó) e devolve
    ao central só o que ela produz:
    - **canal de entrega** (`funcoes/canal_extracao.py`): cada escrita de domínio da pipeline, em
      vez do INSERT, emite um registro JSON com os MESMOS dicts naturais que receberia (nada de id
@@ -119,12 +123,16 @@ sendo lidas por ele (é o `ID_SERVIDOR` da linha que manda, não a flag).
      finalizar) são callbacks `POST /api/no/entrega/<ide>/estado` — é o que mantém card, órbita e
      watchdog funcionando sem o central tocar no arquivo; a resposta do callback carrega
      `cancelar`, por onde o "parar" da tela chega ao nó;
-   - **transcrição**: o áudio já está no disco do nó — o faster-whisper roda lá (Fase 3) e só o
-     TEXTO volta nos lotes (`UPDATE` por `co_caminho_zip`, chave natural);
-   - **quem fica no central**: a recusa por duplicidade interestações (só o banco do central vê os
-     outros aparelhos; o nó manda os hashes, o central confere e manda cancelar se for gêmeo),
-     PIX, identificação de pessoas e indexação semântica — todos pós-entrega, porque exigem o
-     banco. OCR/CLIP/facial seguem no central lendo a imagem pela ponte (os modelos estão lá);
+    - **transcrição**: o áudio já está no disco do nó — o faster-whisper roda LÁ e só o
+      TEXTO volta nos lotes (`UPDATE` por `co_caminho_zip`, chave natural). O botão
+      "Transcrever" de uma extração pronta também é remoto: `POST /no/transcrever` no nó, com
+      progresso/textos/fecho voltando pelos mesmos callbacks de estado (`transcricao` /
+      `transcricao_fim` em `canal_extracao.aplicar_estado`);
+    - **quem fica no central**: a recusa por duplicidade interestações (só o banco do central vê os
+      outros aparelhos; o nó manda os hashes, o central confere e manda cancelar se for gêmeo),
+      PIX e identificação de pessoas — pós-entrega, porque exigem o banco. OCR/CLIP/facial/embeddings
+      rodam TODOS no nó: o central só cria o job com `ID_SERVIDOR` (claim/plano/lote/estado em
+      `jobs_no.py`) e reproduz os lotes de resultado (`jobs_no.aplicar_lote`);
     - **retomada**: o recibo `NO_TB03_LOTES_ENTREGA` (UX por `(id_extracao, nu_lote)`) torna a
       entrega idempotente — o nó reenvia do lote não confirmado; redespacho após queda apaga a
       tentativa parcial antes (`no_entrega.reiniciar_entrega`) para a passada nova nascer limpa;
@@ -176,11 +184,10 @@ sendo lidas por ele (é o `ID_SERVIDOR` da linha que manda, não a flag).
    `.parcial`) e o progresso/bytes do job continuam os mesmos.
 5. **Mídia e enriquecimento (o "passaporte")**: `investigacao_utils.fonte_ufdr(no_arquivo)` responde
    Path local **ou** `no_ponte.FonteRemota`, e `ufdr_zip.abrir`/`ufdr_cache` aceitam os dois — UMA
-   decisão roteia todos os leitores: imagens/áudio/vídeo/anexos das telas, metadados EXIF/QuickTime,
-   OCR, classificação CLIP, comparação facial, transcrição (o pool faster-whisper recebe a fonte
-   pickleável e reaproveita o ZIP aberto por processo de worker) e relatórios com imagens. O CPU
-   pesado (Tesseract, CLIP, whisper) continua no central — onde estão os modelos; pela WAN passam só
-   os membros lidos (alguns KB/MB), nunca o pacote.
+   decisão roteia todos os leitores: imagens/áudio/vídeo/anexos das telas, metadados EXIF/QuickTime
+   e relatórios com imagens. O CPU pesado (Tesseract, CLIP, whisper, embeddings) **não existe mais
+   no central**: roda no nó (jobs/`/no/embed`); pela WAN passam só os membros lidos (alguns KB/MB)
+   para as telas, nunca o pacote.
 6. **Nuvem embutida** (ZIP/TAR aninhado do Google/iCloud dentro do `.ufdr`): as janelas de bytes do
    `ufdr_cache` viram faixas HTTP sobre o `ArquivoRemoto` — o passe roda no nó sem mudar nada.
 7. **Batimento**: qualquer chamada do nó ao central atualiza `DT_ULTIMO_HEARTBEAT`; o ping
@@ -236,8 +243,9 @@ sem o compose novo) o nó loga uma vez, tenta em backoff e funciona 100% pela po
 
 ## Jobs de imagem no nó (OCR / classificação CLIP / comparação facial)
 
-Com `JOBS_NO_ATIVO=ocr|tudo` no .env do central, os jobs das delegacias com nó ONLINE nascem
-marcados (`JOB_TB01_JOBS.ID_SERVIDOR`) e nenhuma thread sobe no central — a CPU da estação, que já
+No central puro os jobs de imagem **sempre** vão para a estação: a rota exige nó ativo/online
+(`jobs_no.exigir_no_para_job` — 409 com o motivo quando não há) e a linha nasce marcada
+(`JOB_TB01_JOBS.ID_SERVIDOR`); nenhuma thread de modelo sobe no central. A CPU da estação, que já
 tem a prova no disco, faz o Tesseract/CLIP. O nó PERGUNTA (nada empurra para dentro do NAT):
 
 ```
@@ -250,14 +258,15 @@ POST /api/no/jobes/<id>/estado  → progresso/concluir/erro/finalizar/cancelado 
                                   `cancelar` — é por aí que o "parar" da tela chega à estação)
 ```
 
-A face do nó (`api/funcoes/no_jobs.py`) reusa as funções puras do central
+A face do nó (o operário vive no repositório do nó) reusa as funções puras espelhadas lá
 (`_executar_ocr`, `_classificar_lote`, `_embeddings_do_lote`) lendo o `.ufdr` LOCAL; o fechamento
 da comparação facial é uma multiplicação de matriz no central contra os vetores devolvidos (o
 vetor da referência volta no próprio callback `finalizar` — nenhum CLIP nem imagem no central).
 Vaga local: `JOBS_NO_LIMITE` no .env do nó (teto da estação, flock elege um worker por container).
 CLIP exige o modelo no cache HF do nó — volume `hf_cache` no `docker-compose.no.yml`; estações sem
-saída para o Hugging Face pré-semeiam o volume (a `docker cp` do cache do central).
-`ocr_imagem_selecao` (seleção ≤200 imagens da IA) fica no central de propósito.
+saída para o Hugging Face pré-semeiam o volume (com `docker cp` do cache de outro nó).
+`ocr_imagem_selecao` (seleção ≤200 imagens pedida pela IA no chat) desce como OCR comum: o plano
+filtra pelos ids resolvidos no central (`tx_parametros.ids_arquivos`) e a estação reconhece.
 
 ## Rollout de update em levas
 
@@ -280,13 +289,18 @@ mídia"); qualquer recusa derruba o navegador no proxy de sempre, silenciosament
 arquitetura, ticket, checklist da TI, runbook de certificado — em
 [no_midia_direta.md](no_midia_direta.md).
 
-## O que ainda NÃO roda no nó (próxima camada)
-- **Nuvem IPED**: a importação processa o caso com o dumper Java em `data/` e grava ponteiros
-  "IPED::..." lidos pelo `iped_cache` — exige a PASTA DO CASO no disco do central. Delegacia com
-  nó deve importar a nuvem IPED pelas vias de sempre (arquivo no central); rodar o dumper no nó é
-  a próxima fronteira natural (o mesmo `FonteRemota` não basta: é uma árvore de storage SQLite);
-- **embeddings de texto na estação**: continuam no central (Ollama) — o custo é pequeno e o
-  modelo é grande; nada perdido em deixar lá.
+## O que ainda NÃO roda no nó (bloqueado no central até o nó suportar)
+- **Nuvem IPED**: o dumper Java exige a árvore do caso (storage SQLite) no disco de quem processa.
+  A rota `extrair-iped` devolve **409** ("será liberada quando o nó suportar o dumper") e a aba da
+  tela mostra o aviso — `GET /api/investigacao/iped-disponivel` responde `disponivel: false`;
+- **Parser RIF/SIMBA**: o `_validar_*` + parse hoje percorre dezenas de CSVs no disco de quem
+  processa. O upload já cai na `data/` do nó, mas as rotas `extrair-rif`/`extrair-simba` devolvem
+  **409** até o nó expor o parse da pasta/CSV;
+- **`POST /no/embed`** (geração de embeddings na estação): protocolo novo — nós antigos respondem
+  404 e o central traduz para "atualize o nó"; a busca semântica degrada para aviso e a indexação
+  da cauda pós-entrega é pulada;
+- **`POST /no/transcrever`** (botão "Transcrever" de uma extração pronta): idem — nós antigos não
+  têm o endpoint e a rota devolve mensagem clara.
 
 ## Arquivos desta feature
 
@@ -297,16 +311,15 @@ arquitetura, ticket, checklist da TI, runbook de certificado — em
 | `db/migracoes/0037_delegacia_uf.sql` | `DELEGACIAS.UF` na gerência |
 | `db/init/07_seguranca_usuarios.sql`, `db/migracoes/0036_delegacia_no_ativa.sql` | `DELEGACIAS.IN_NO_ATIVA` — o "usa o nó" por delegacia |
 | `db/init/46_nos.sql (NO_TB03)`, `db/migracoes/0039_no_lotes_entrega.sql` | recibo por lote entregue (`UX111`) — a idempotência da retomada |
-| `api/funcoes/no_utils.py` | registro, token, batimento, `servidor_ativo_para`, `servidor_por_arquivo`, heartbeat de saída, varredura de .parcial |
-| `api/funcoes/no_ponte.py` | cliente central→nó: `ArquivoRemoto` (Range), `FonteRemota` (passaporte), hash, parse, stream, espelho, upload (`enviar_arquivo`/`enviar_zip`) |
+| `api/funcoes/no_utils.py` | registro, token, batimento, `servidor_ativo_para`, `servidor_por_arquivo`, `listagem_remota`, `SEM_NO_ATIVO_MSG` (metade nó apagada daqui — vive no repositório do nó) |
+| `api/funcoes/no_ponte.py` | cliente central→nó: `ArquivoRemoto` (Range), `FonteRemota` (passaporte), hash, parse, stream, upload (`enviar_arquivo`/`enviar_zip`), `embed` (`/no/embed`), `iniciar_transcricao_remota` (`/no/transcrever`) |
 | `api/funcoes/ufdr_zip.py`, `ufdr_cache.py` | `abrir()`/caches aceitam `FonteRemota` — a costura que dá passaporte a ~25 leitores sem tocá-los |
-| `api/rotas/no_servico.py` | o que o nó atende: `/no/saude`, `/no/hash`, `/no/parse`, `/no/listar`, `/no/arquivo`, `/no/enviar`, `/no/enviar-zip`, `/no/enviar-progresso`, **`/no/extrair`**, `/no/atualizar|atualizacao`, `/no/estado`, `/no/config`+`/no/reiniciar` (desempenho por nó: o central lê e regrava as chaves do `.env` da estação — `EXTRACOES_SIMULTANEAS`, `TRANSCRICAO_THREADS`, `API_WORKERS` — e emenda o reinício quando a chave exige recriar o container) |
-| `api/funcoes/no_extracao.py` | o nó como OPERÁRIO: fila local (`EXTRACOES_SIMULTANEAS`), thread da pipeline em modo entrega, HTTP de entrega com retomada |
-| `api/funcoes/canal_extracao.py` | o canal: `CanalEntrega` (lotes JSONL + callbacks + batimento-ponte) e o REPLAY do central com as mesmas funções de gravação |
+| (repositório do nó) `rotas/no_servico.py`, `funcoes/no_extracao.py`, `funcoes/no_jobs.py`, `funcoes/tunel_no.py` | a face do nó: `/no/*` (saude, hash, parse, listar, arquivo, enviar, extrair, transcrever, embed, atualizar, config), fila de extração, operário de jobs, cliente do túnel — NÃO existem mais neste repositório |
+| `api/funcoes/canal_extracao.py` | o REPLAY do central: `reproduzir_lote`/`aplicar_estado` com as mesmas funções de gravação (emissor/`CanalEntrega` moram no nó) |
 | `api/funcoes/no_entrega.py` | recebedor do central: idempotência por lote, callbacks de estado, redespacho limpo, cauda pós-entrega (PIX/identação/embeddings) |
 | `api/rotas/no_central.py` | o que o central atende do nó: `/api/no/ping`, `/api/no/entrega/<ide>/lote/<n>`, `/api/no/entrega/<ide>/estado`, `/api/no/entrega/<ide>`, **`/api/no/jobes/claim|plano|lote|estado`** |
-| `api/tunel_app.py`, `api/funcoes/tunel_proto.py`, `api/funcoes/tunel_no.py` | túnel NAT: o relay HTTP↔WS (serviço `tunel`), o protocolo de quadros, o cliente que roda no nó |
-| `api/funcoes/jobs_no.py`, `api/funcoes/no_jobs.py` | jobs no nó: a metade central (claim/plano/lote/estado + rollout em levas) e o operário da estação (OCR/CLIP/facial) |
+| `api/tunel_app.py`, `api/funcoes/tunel_proto.py` | túnel NAT: o relay HTTP↔WS (serviço `tunel`) e o protocolo de quadros (o cliente que roda no nó vive no repositório do nó) |
+| `api/funcoes/jobs_no.py` | jobs no nó, metade central: claim/plano/lote/estado + rollout em levas + `exigir_no_para_job` |
 | `db/migracoes/0058_tunel_jobs_no.sql` | `NO_TB01.DT_TUNEL_ATIVO` + índice do claim (`IX435`) |
 | `db/init/09_extracoes.sql`, `db/migracoes/0059_geracao_entrega.sql` | `INQ_TB02.NU_GERACAO` — a geração que aposenta a passada substituída |
 | `api/rotas/servidores.py` | Administração → Servidores (CRUD + trocar token + testar + proxies `/atualizar`, `/estado`, `/config` + **`/atualizar-todos`**/**`/atualizacao-todos`** do rollout) |

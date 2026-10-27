@@ -33,17 +33,8 @@ import time
 TTL_PADRAO_S = 600  # 10 minutos: dá o tempo de abrir o modal e baixar um vídeo grande
 
 
-class TicketInvalido(ValueError):
-    """Assinatura que não bate, JSON deformado ou prazo vencido — o nó responde 403 e o navegador
-    cai sozinho para o caminho de sempre (proxy do central)."""
-
-
 def _b64e(dados: bytes) -> str:
     return base64.urlsafe_b64encode(dados).rstrip(b"=").decode("ascii")
-
-
-def _b64d(texto: str) -> bytes:
-    return base64.urlsafe_b64decode(texto + "=" * (-len(texto) % 4))
 
 
 def emitir(segredo: str, payload: dict, ttl_s: int = TTL_PADRAO_S) -> str:
@@ -58,29 +49,3 @@ def emitir(segredo: str, payload: dict, ttl_s: int = TTL_PADRAO_S) -> str:
     texto = _b64e(bruto).encode("ascii")
     assinatura = hmac.new(segredo.encode("utf-8"), texto, hashlib.sha256).hexdigest()
     return texto.decode("ascii") + "." + assinatura
-
-
-def validar(segredo: str, ticket: str) -> dict:
-    """Confere assinatura e prazo e devolve o payload. Nunca diz QUAL parte falhou por detalhe —
-    um 403 seco já basta para quem está do lado de fora."""
-    if not segredo:
-        raise TicketInvalido("nó sem credencial configurada")
-    bruto, _, assinatura = (ticket or "").rpartition(".")
-    if not bruto or not assinatura:
-        raise TicketInvalido("formato inválido")
-    esperado = hmac.new(segredo.encode("utf-8"), bruto.encode("ascii"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(esperado, assinatura.lower()):
-        raise TicketInvalido("assinatura inválida")
-    try:
-        payload = json.loads(_b64d(bruto).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise TicketInvalido("payload ilegível") from exc
-    if not isinstance(payload, dict):
-        raise TicketInvalido("payload inválido")
-    try:
-        expira = int(payload.get("x") or 0)
-    except (TypeError, ValueError):
-        raise TicketInvalido("prazo inválido")
-    if expira < time.time():
-        raise TicketInvalido("ticket expirado")
-    return payload

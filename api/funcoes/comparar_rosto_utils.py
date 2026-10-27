@@ -33,8 +33,6 @@ from contextlib import ExitStack
 from io import BytesIO
 
 import numpy as np
-import torch
-import torch.nn.functional as F
 from PIL import Image as PILImage
 
 from funcoes import jobs_pesados, jobs_utils, ufdr_cache
@@ -61,10 +59,12 @@ _BATCH_SIZE = 32
 # o gargalo passa a ser o CLIP, e as threads só disputam CPU com ele.
 _WORKERS_IO = 4
 
-# pré-processamento do CLIP (mesmos valores do preprocessor_config.json do modelo)
+# pré-processamento do CLIP (mesmos valores do preprocessor_config.json do modelo).
+# O central não carrega torch: o pré-processamento é numpy e o torch só aparece, tardio, nas
+# funções de forward locais (hoje executadas apenas no nó).
 _TAM_ENTRADA = 224
-_MEDIA = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(1, 3, 1, 1)
-_DESVIO = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(1, 3, 1, 1)
+_MEDIA = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32).reshape(1, 3, 1, 1)
+_DESVIO = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32).reshape(1, 3, 1, 1)
 
 class _Contadores:
     """Contadores de UMA comparação, espelhados na linha do job em JOB_TB01_JOBS.
@@ -130,11 +130,16 @@ def _preparar_pixels(dados: bytes) -> "np.ndarray":
 
 
 def _tensor_do_lote(arrays: list) -> "torch.Tensor":
+    import torch
+
     lote = torch.from_numpy(np.stack(arrays)).permute(0, 3, 1, 2).float()
-    return lote.div_(255.0).sub_(_MEDIA).div_(_DESVIO)
+    return lote.div_(255.0).sub_(torch.from_numpy(_MEDIA)).div_(torch.from_numpy(_DESVIO))
 
 
 def _embeddings_do_lote(model, arrays: list) -> "torch.Tensor":
+    import torch
+    import torch.nn.functional as F
+
     with torch.no_grad():
         saidas = model.vision_model(pixel_values=_tensor_do_lote(arrays))
         embeddings = model.visual_projection(saidas.pooler_output)
@@ -548,14 +553,16 @@ def _executar_comparacao(id_job: int, id_inquerito: int, imagem_upload_bytes: by
                 jobs_utils.concluir(id_job, resultado={"matches": []})
                 return
 
-            matriz = torch.from_numpy(np.stack([salvos[i["id_arquivo"]] for i in itens]))
-            similaridades = (matriz @ emb_referencia.squeeze(0)).clamp_(0.0, 1.0)
+            ref = np.asarray(emb_referencia.squeeze(0), dtype=np.float32)
+            matriz = np.stack([salvos[i["id_arquivo"]] for i in itens]).astype(np.float32)
+            similaridades = np.clip(matriz @ ref, 0.0, 1.0)
 
             k = min(limite, len(itens))
-            melhores = torch.topk(similaridades, k)
+            ordem = np.argsort(-similaridades)[:k]
             resultados = []
-            for valor, indice in zip(melhores.values.tolist(), melhores.indices.tolist()):
+            for indice in ordem.tolist():
                 item = itens[indice]
+                valor = float(similaridades[indice])
                 resultados.append({
                     "id_arquivo": item["id_arquivo"],
                     "no_arquivo": item["no_arquivo"],

@@ -529,71 +529,27 @@ def salvar_ufdr_enviado(fluxo, nome_original: str, subpasta: str | None = None,
     if not token or not _RE_TOKEN_UPLOAD.match(token):
         raise ValueError("Token de acompanhamento inválido.")
 
-    # Delegacia com nó ativo (docs/no_descentralizado.md): o upload VAI para a pasta da delegacia,
-    # não para o central — é lá que a evidência mora e de onde a extração a lerá. O central
+    # O central NÃO importa: o upload VAI para a pasta da delegacia no NÓ (docs/
+    # no_descentralizado.md) — é lá que a evidência mora e de onde a extração a lerá. O central
     # repassa o corpo em streaming (PUT /no/enviar) sem nunca materializar os GB, e o NÓ decide o
     # nome final (reivindicação exclusiva na pasta dele). O progresso acompanha pelo mesmo
     # mecanismo: .parcial nomeado pelo token, perguntado ao nó em progresso_ufdr_upload.
     from funcoes import no_utils
 
     no = no_utils.servidor_ativo_para(subpasta)
-    if no is not None:
-        from funcoes import no_ponte
+    if no is None:
+        raise ValueError(
+            "Esta delegacia não tem servidor (nó) ativo — e o sistema central não guarda provas: "
+            "o envio e a extração acontecem sempre no servidor da delegacia. Cadastre/ative o nó "
+            "em Administração → Servidores (e o \"Usa o Nó\" da delegacia) e tente de novo.")
 
-        relativo = f"{subpasta}/{nome}" if subpasta else nome
-        try:
-            return no_ponte.enviar_arquivo(no, fluxo, relativo, token=token)
-        except no_ponte.NoIndisponivel as exc:
-            raise ValueError(str(exc)) from exc
+    from funcoes import no_ponte
 
-    pasta = _subpasta_delegacia(subpasta)
-    pasta.mkdir(parents=True, exist_ok=True)
-    parcial = pasta / f"{token}.ufdr.parcial"
-
-    total = 0
-    # Digestos calculados DURANTE a gravação (md5+sha1, os mesmos da importação) e gravados no
-    # sidecar <nome>.hashes.json: quando a extração chegar, a passada de hash encontra o sidecar
-    # e não relê os GB. O sidecar é melhor esforço — sem ele a importação só hasheia normal.
-    hasheador = HasheadorStreaming(_ALGORITMOS_HASH_UFDR)
+    relativo = f"{subpasta}/{nome}" if subpasta else nome
     try:
-        with open(parcial, "wb") as saida:
-            while True:
-                bloco = fluxo.read(_BLOCO_UPLOAD)
-                if not bloco:
-                    break
-                total += len(bloco)
-                hasheador.atualizar(bloco)
-                saida.write(bloco)
-        if total == 0:
-            raise ValueError(f"{nome}: arquivo vazio.")
-
-        # Só aqui o nome final é decidido: a gravação inteira já aconteceu, então a posse é curta
-        # e a conferência "não sobrescrever prova de ninguém" vale contra o que existir agora (e
-        # não contra o que existia horas atrás, quando o upload começou).
-        sufixo = 1
-        while True:
-            nome_final = raiz + (f" ({sufixo})" if sufixo > 1 else "") + ".ufdr"
-            alvo = pasta / nome_final
-            try:
-                open(alvo, "xb").close()
-                break
-            except FileExistsError:
-                if sufixo > 999:
-                    raise ValueError(f"{nome}: já existem arquivos demais com este nome em data/.")
-                sufixo += 1
-        os.replace(parcial, alvo)
-    except BaseException:
-        # nada de meio-arquivo em data/: o .parcial (e o alvo vazio, se a posse chegou a
-        # acontecer) somem, senão a listagem mostraria um .ufdr que não está inteiro e a
-        # extração falharia depois, longe daqui
-        parcial.unlink(missing_ok=True)
-        if "alvo" in locals() and alvo.exists() and alvo.stat().st_size == 0:
-            alvo.unlink(missing_ok=True)
-        raise
-
-    gravar_sidecar_hashes(alvo, hasheador.finalizar(), total)
-    logger.info("UFDR enviado pelo navegador: %s (%s bytes)", alvo, total)
-    return {"nome": alvo.name, "tamanho_bytes": total}
+        return no_ponte.enviar_arquivo(no, fluxo, relativo, token=token)
+    except no_ponte.NoIndisponivel as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def progresso_ufdr_upload(token: str, subpasta: str | None = None) -> dict | None:
@@ -608,14 +564,8 @@ def progresso_ufdr_upload(token: str, subpasta: str | None = None) -> dict | Non
     token "../../x" viraria stat() fora da delegacia (oráculo de existência/tamanho). Ver F4."""
     if not token or not _RE_TOKEN_UPLOAD.match(token):
         return None
-    pasta = _subpasta_delegacia(subpasta)
-    caminho = pasta / f"{token}.ufdr.parcial"
-    try:
-        return {"bytes": caminho.stat().st_size}
-    except OSError:
-        pass
-    # upload de delegacia com nó: o .parcial está na pasta do NÓ (salvar_ufdr_enviado repassou) —
-    # a pergunta vai à mesma pasta pela ponte, com o mesmo nome
+    # o .parcial está na pasta do NÓ (salvar_ufdr_enviado repassa tudo) — a pergunta vai à mesma
+    # pasta pela ponte, com o mesmo nome
     from funcoes import no_utils
 
     no = no_utils.servidor_ativo_para(subpasta)
@@ -889,23 +839,23 @@ def iniciar_extracao(nome_arquivo: str, numero_inquerito: str, id_usuario: int |
     in_caso_inteligencia: quando True, o inquérito nasce como caso de inteligência (número gerado
     automaticamente se não informado).
 
-    Arquivo no NÓ (docs/no_descentralizado.md): o arquivo não está no data() do central mas a
-    delegacia tem nó ativo que O tem? A extração nasce com ID_SERVIDOR — o despachante então pula
-    a resolução local e _processar_extracao lê o .ufdr por faixas via HTTP, com o hash calculado
-    no próprio nó. O arquivo local manda: se ele existe, o central processa em casa, como sempre
-    (deixa o caminho de migração — reprocessar extrações antigas — funcionando sem esforço)."""
+    O central NÃO processa: o .ufdr mora na pasta do NÓ da delegacia e a extração nasce com
+    ID_SERVIDOR — o despachante delega o processamento à estação (POST /no/extrair) e recebe de
+    volta só os dados estruturados. Sem nó ativo a extração é RECUSADA: não existe mais o
+    caminho "processar em casa" (docs/no_descentralizado.md)."""
     from funcoes import no_utils
 
     caminho = _subpasta_delegacia(subpasta) / nome_arquivo
-    id_servidor = None
-    if not caminho.is_file():
-        no = no_utils.servidor_ativo_para(delegacia)
-        if no is None or not no_ponte_arquivo_existe(no, nome_arquivo):
-            raise FileNotFoundError(nome_arquivo)
-        id_servidor = no["id_servidor"]
-        # o NO_ARQUIVO do nó é o caminho RELATIVO à pasta dele — mesmo esquema de subpastas
-        # (data/<delegacia>/...) do central, então o relativo local serve dos dois lados
-        nome_arquivo = caminho.relative_to(PASTA_DADOS).as_posix()
+    nome_arquivo = caminho.relative_to(PASTA_DADOS).as_posix()
+    no = no_utils.servidor_ativo_para(delegacia)
+    if no is None:
+        raise ValueError(
+            "Esta delegacia não tem servidor (nó) ativo — e a extração roda sempre no servidor "
+            "da delegacia. Cadastre/ative o nó em Administração → Servidores (e o \"Usa o Nó\" "
+            "da delegacia) e tente de novo.")
+    if not no_ponte_arquivo_existe(no, nome_arquivo):
+        raise FileNotFoundError(nome_arquivo)
+    id_servidor = no["id_servidor"]
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -1092,19 +1042,12 @@ def _despachar_linha(linha: dict) -> None:
                 f"O servidor da delegacia não aceitou processar esta extração: {exc}. "
                 "Confira se ele está online e na mesma versão do central, e rode de novo.")
         return
-    # o caminho é resolvido AGORA: a linha pode ter sido enfileirada há minutos, e o
-    # organizador de arquivos pode ter movido o .ufdr nesse meio-tempo
-    caminho = _localizar_ufdr(linha["no_arquivo"])
-    if caminho is None:
-        _marcar_erro_extracao(
-            linha["id_extracao"],
-            "O arquivo .ufdr não foi encontrado na pasta de dados quando chegou a vez "
-            "desta extração na fila. Restaure o arquivo e importe de novo.")
-        logger.error("Extração %s falhou: arquivo .ufdr não encontrado na pasta de dados (%s)",
-                     linha["id_extracao"], linha["no_arquivo"])
-        return
-    threading.Thread(target=_processar_extracao,
-                     args=(linha["id_extracao"], caminho), daemon=True).start()
+    # sem servidor não há o que despachar: o central não processa extração em casa (linhas
+    # antigas, enfileiradas antes da regra, param aqui com causa honesta)
+    _marcar_erro_extracao(
+        linha["id_extracao"],
+        "Esta extração não nasceu em um servidor de delegacia (nó), e o central não processa "
+        "importações: reimporte o arquivo pela delegacia com nó ativo.")
 
 
 def _despachante_extracoes() -> None:
@@ -1792,10 +1735,14 @@ def _indexar_semantica_ao_final(id_extracao: int, bat: "_Batimento") -> str | No
     baixado), para a extração concluir com o alerta em vez de parecer completa."""
     from funcoes.embed_utils import IndexacaoOcupada, embeddings_configurados, indexar_sincrono, obter_indexacao
 
-    if bat.cancelar_pedido() or not embeddings_configurados():
+    if bat.cancelar_pedido():
         return None
     id_inquerito = obter_id_inquerito_de_extracao(id_extracao)
     if id_inquerito is None:
+        return None
+    # a geração de embeddings é do nó da delegacia: sem nó, a extração segue sem a cauda
+    # semântica (a busca literal continua) — mesma política de "melhor effort" de sempre
+    if not embeddings_configurados(id_inquerito):
         return None
     bat.fase("indexando_semantica")
 
@@ -3245,15 +3192,19 @@ def _aplicar_transcricao(cur, prefixo: str, id_extracao: int, caminho_zip: str,
 
 
 def iniciar_transcricao_extracao(id_extracao: int, modelo: str = "small") -> dict:
-    """Dispara, em segundo plano, a transcrição dos áudios ainda não transcritos de uma extração
-    (o botão "Transcrever" do modal "todas as extrações"). Usa sempre o modelo passado — padrão
-    "small", a qualidade média — e respeita o IN_TRANSCREVER_VIDEO que o usuário marcou na
-    extração original.
+    """Dispara a transcrição dos áudios ainda não transcritos de uma extração NO NÓ da delegacia
+    (o botão "Transcrever" do modal "todas as extrações"; POST /no/transcrever — docs/
+    no_descentralizado.md). O faster-whisper vive na estação: o central só vira a extração para
+    'processando'/'transcrevendo' e recebe os textos + o fecho pelos callbacks de estado
+    (canal_extracao.aplicar_estado). Respeita o IN_TRANSCREVER_VIDEO da extração original.
 
     Devolve {"ok": True, "pendentes": n} se a transcrição foi iniciada, ou
     {"ok": False, "mensagem": ...} se não havia o que transcrever. Levanta ValueError quando a
-    extração ainda está em andamento ou o .ufdr não está mais na pasta de dados (a rota converte
-    em 409/400 com mensagem legível)."""
+    extração ainda está em andamento, a delegacia não tem nó ativo, ou o .ufdr não está mais na
+    pasta da estação (a rota converte em 409/400 com mensagem legível)."""
+    from funcoes import no_ponte, no_utils
+    from funcoes.no_utils import SEM_NO_ATIVO_MSG
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -3268,17 +3219,29 @@ def iniciar_transcricao_extracao(id_extracao: int, modelo: str = "small") -> dic
         if cd_status in ("pendente", "processando"):
             raise ValueError("A extração ainda está em andamento — aguarde terminar para transcrever.")
 
-    caminho = fonte_ufdr(no_arquivo)
-    if caminho is None:
-        raise ValueError("O arquivo .ufdr desta extração não está mais acessível (nem no central, "
-                         "nem no servidor da delegacia) — restaure o arquivo antes de transcrever.")
+    # o arquivo e o whisper estão na estação: o nó dono é o da extração (snapshot) ou o atual
+    # da delegacia do inquérito
+    no = no_utils.servidor_da_extracao(id_extracao)
+    if no is None or not no.get("in_ativa"):
+        id_inquerito = obter_id_inquerito_de_extracao(id_extracao)
+        delegacia = None
+        if id_inquerito is not None:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT no_delegacia FROM investigacao.inq_tb01_inqueritos "
+                                "WHERE id_inquerito = %s", (id_inquerito,))
+                    linha = cur.fetchone()
+                    delegacia = linha[0] if linha else None
+        no = no_utils.servidor_ativo_para(delegacia)
+    if no is None or not no.get("online"):
+        raise ValueError(SEM_NO_ATIVO_MSG)
 
     pendentes = _listar_anexos_audio_pendentes(id_extracao, bool(incluir_video))
     if not pendentes:
         return {"ok": False, "mensagem": "Não há áudios pendentes de transcrição nesta extração."}
 
-    # Transição atômica para 'processando': dois cliques (ou duas abas) não podem subir dois pools
-    # de transcrição sobre o mesmo conjunto — o segundo UPDATE não devolve linha e a rota responde
+    # Transição atômica para 'processando': dois cliques (ou duas abas) não podem disparar duas
+    # transcrições sobre o mesmo conjunto — o segundo UPDATE não devolve linha e a rota responde
     # 409. Deixa também o estado visível na hora para o badge e o polling da tela.
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -3296,15 +3259,27 @@ def iniciar_transcricao_extracao(id_extracao: int, modelo: str = "small") -> dic
     if not ok:
         raise ValueError("A extração ainda está em andamento — aguarde terminar para transcrever.")
 
-    thread = threading.Thread(
-        target=_processar_transcricao_extracao,
-        args=(id_extracao, caminho, modelo, bool(incluir_video)),
-        daemon=True,
-    )
-    thread.start()
+    try:
+        no_ponte.iniciar_transcricao_remota(no, id_extracao, no_arquivo, modelo,
+                                            bool(incluir_video))
+    except Exception as exc:
+        # o nó recusou/está fora: devolve a extração ao estado anterior com o aviso — nada
+        # atravessou para a estação
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE investigacao.inq_tb02_extracoes SET cd_status = 'concluido', "
+                    "cd_fase = NULL, qt_progresso_fase = NULL, tx_aviso = %s "
+                    "WHERE id_extracao = %s AND cd_status = 'processando'",
+                    (f"Transcrição não iniciada: {exc}"[:2000], id_extracao),
+                )
+            conn.commit()
+        raise ValueError(f"O servidor da delegacia não aceitou transcrever: {exc}")
+
     n = len(pendentes)
     return {"ok": True, "pendentes": n,
-            "mensagem": f"Transcrição iniciada de {n} áudio(s) pendente(s) — acompanhe o progresso no status da extração."}
+            "mensagem": f"Transcrição de {n} áudio(s) pendente(s) iniciada no servidor "
+                        f"{no.get('no_servidor')} — acompanhe o progresso no status da extração."}
 
 
 def _processar_transcricao_extracao(id_extracao: int, caminho: Path, modelo: str,

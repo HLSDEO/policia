@@ -479,10 +479,12 @@ Detalhes de `main.py`:
 | `documentacao` | `GET /api/documentacao` e `GET /api/documentacao/{nome}` — os `.md` desta pasta lidos dentro do sistema — admin — ver `interface.md` |
 | `delegacias` | multidelegacia: `GET /api/delegacias` público (usado no cadastro e edição de usuários); criar/atualizar/excluir exigem admin (routers `router` e `router_admin`) — ver `permissoes_delegacia.md` |
 | `servidores` | Administração → Servidores: CRUD dos nós descentralizados; o token é gerado ali, mostrado uma única vez e nunca volta numa listagem — ver `no_descentralizado.md` |
-| `no_central` | rotas `/api/no/*` no **central**, autenticadas pelo token do nó (Bearer): ping/heartbeat, entrega de lotes, recibos — ver `no_descentralizado.md` |
-| `no_servico` | rotas que **só existem com `PAPEL=no`** (`/no/saude`, `/no/hash`, `/no/parse`, leitura por faixas): o que o central chama no nó; sem Postgres no nó — ver `no_descentralizado.md` |
+| `no_central` | rotas `/api/no/*` no **central**, autenticadas pelo token do nó (Bearer): ping/heartbeat, entrega de lotes, recibos, jobs (claim/plano/lote/estado) — ver `no_descentralizado.md` |
+| (nó) `/no/*` | as rotas que o central chama na estação (`/no/saude`, `/no/hash`, `/no/parse`, `/no/extrair`, `/no/transcrever`, `/no/embed`, leitura por faixas) vivem no repositório do nó — não existem neste |
 
-Padrões transversais: jobs pesados (OCR, classificação CLIP, comparação facial) rodam em threads com progresso e cancelamento cooperativo — se já houver um em andamento a rota responde `409`;
+Padrões transversais: jobs pesados (OCR, classificação CLIP, comparação facial) **rodam no nó da
+delegacia** — o central só cria a fila (`ID_SERVIDOR`) e reproduz os resultados; sem nó ativo a
+rota responde `409` com o motivo;
 processamento de extração/import/IA roda em background com *polling* da tela.
 
 #### Lógica em `api/funcoes/`
@@ -497,8 +499,8 @@ As funções de suporte estão distribuídas por módulo de assunto:
 | Investigação | `investigacao_utils.py` (SQL, acesso por inquérito, binário de arquivos), `identificacao_pessoas.py`, `pix_utils.py`, `entidades_utils.py`, `entidades_auto_utils.py` (regex com validação — ver `entidades_auto.md`), `canonicas_utils.py`, `busca_entidades_utils.py`, `padroes_utils.py`, `relatorios_utils.py`, `relatorios_docx.py`, `marcadores_utils.py`, `compartilhar_prova.py`, `comparar_celulares_utils.py`, `correlacao_nuvem_utils.py` |
 | Importação/parse | `import_utils.py`, `rif_utils.py`, `simba_utils.py`, `ipl_utils.py`, `irpf_utils.py`, `ipei_utils.py`, `telefonia_utils.py`, `ufdr_parser.py`, `zip_import.py`, `upload_utils.py`, `organizacao_arquivos.py`, `rede_smb.py` |
 | IA | `ia_provedores.py` (loop de chamadas OpenAI-compatível/Anthropic/Google), `ia_investigacao.py` (ferramentas do chat), `ia_historico.py`/`ia_eventos.py` (conversas e a trilha de raciocínio do SSE), `ia_auditoria.py`, `ia_utils.py` (prompt de sistema), `ia_avisos.py`/`ia_webhook.py` (avisos de conclusão), `ia_delegacia.py`/`config_ia_usuario.py` (IA por delegacia e do usuário), `rag_hibrido.py` (busca híbrida RRF), `embed_utils.py` (busca semântica), `ollama_pull.py`, `busca_automatica_utils.py`, `prompts_entidade_utils.py`, `resumo_noturno.py` + `agendador.py` (batch da madrugada) |
-| Mídia local | `transcricao.py` (faster-whisper), `classificacao_imagem_utils.py` (CLIP), `ocr_utils.py` (Tesseract), `comparar_rosto_utils.py`, `jobs_pesados.py` (limite conjunto), `documentos_utils.py` |
-| Nós descentralizados | `no_utils.py` (papel, token, heartbeat), `no_extracao.py`/`no_entrega.py` (o que o nó faz), `no_ponte.py` (o que o central chama no nó), `canal_extracao.py` (a mesma extração em qualquer um dos dois lados) — ver `no_descentralizado.md` |
+| Mídia local | `documentos_utils.py`; `transcricao.py`/`ocr_utils.py`/`classificacao_imagem_utils.py`/`comparar_rosto_utils.py` guardam só o **replay de resultados** do nó (os modelos — whisper, Tesseract, CLIP — rodam na estação; imports pesados são tardios) |
+| Nós descentralizados | `no_utils.py` (registro, token, batimento, `SEM_NO_ATIVO_MSG`), `no_entrega.py` (recebimento da entrega no central), `no_ponte.py` (o que o central chama no nó), `canal_extracao.py` (replay dos registros), `jobs_no.py` (jobs no nó) — ver `no_descentralizado.md` |
 | Diversos | `geocodificacao_utils.py` (Nominatim), `geoespacial_utils.py` (camadas SHP/GeoJSON), `email_utils.py` (SMTP de recuperação), `wifi_utils.py`, `contas_nuvem_utils.py`, `logging_config.py`, `migrar_utils.py` (runner de migrações), `versao_utils.py`, `desempenho_utils.py`, `anonimizacao.py` |
 
 #### Logging estruturado (JSON)

@@ -12,7 +12,6 @@ from funcoes.auth_utils import exigir_aprovado
 from funcoes.db_utils import abrir_pool, fechar_pool
 from funcoes.investigacao_utils import InqueritoDeOutraDelegacia
 from funcoes.no_ponte import NoIndisponivel
-from funcoes.no_utils import eh_no as _eh_no
 from rotas import (
     hipoteses,
     api_pf,
@@ -38,7 +37,6 @@ from rotas import (
     jobs,
     marcadores,
     no_central,
-    no_servico,
     ocr_imagem,
     padroes,
     prompts_entidade,
@@ -52,10 +50,10 @@ from rotas import (
     usuarios,
 )
 
-# Dois papéis, um projeto (ver docs/no_descentralizado.md): o CENTRAL tem web + API + Postgres;
-# o NÓ de delegacia não tem banco nem web — só as rotas /no/* que o central chama e o heartbeat.
-# Toda a divisão parte deste booleano; abrir_pool/migrações/despachante só existem no central.
-_PAPEL_NO = _eh_no()
+# Este processo é sempre o CENTRAL: web + API + Postgres + navegação. O código do NÓ de delegacia
+# (rotas /no/*, operários de extração/jobs, cliente do túnel) vive em repositório próprio — aqui
+# só a ponte (funcoes/no_ponte.py) e o recebimento (rotas/no_central.py, no_entrega.py).
+# Nenhuma importação roda aqui: upload, parse e jobs pesados são sempre do nó da delegacia.
 
 logger = logging.getLogger(__name__)
 
@@ -75,51 +73,46 @@ app.add_middleware(ContextoRequisicao)
 # passa, exigir_aprovado não) consegue entrar mas nada mais funciona até um admin aprovar.
 protegido = [Depends(exigir_aprovado)]
 
-app.include_router(sistema.router)  # health check: os dois papéis respondem
+app.include_router(sistema.router)  # health check
 
-if _PAPEL_NO:
-    # Nó: só as rotas internas que o central chama (hash/parse/arquivo por faixa). Nada de web,
-    # sessão ou banco — nenhuma das rotas de usuário existe neste processo.
-    app.include_router(no_servico.router)
-else:
-    app.include_router(servidores.router)  # Administração → Servidores (nós descentralizados)
-    app.include_router(no_central.router)  # /api/no/* autenticados por token de nó (ping/heartbeat)
-    app.include_router(sistema.router_admin)  # já se autoprotege com exigir_admin no router
-    app.include_router(auth.router)
-    app.include_router(usuarios.router)  # já se autoprotege com exigir_admin no router
-    app.include_router(delegacias.router)  # GET público (lista para cadastro); admin nos demais
-    app.include_router(delegacias.router_admin)  # POST/PUT/DELETE exigem admin
-    app.include_router(unidades.router_admin)  # árvore de unidades superiores: só Administração
-    app.include_router(prompts_entidade.router)  # já se autoprotege com exigir_admin no router
-    app.include_router(auditoria_ia.router)  # já se autoprotege com exigir_auditoria no router
-    app.include_router(auditoria_acesso.router)  # já se autoprotege com exigir_auditoria no router
-    app.include_router(auditoria_usuarios.router)  # já se autoprotege com exigir_auditoria no router
-    app.include_router(configuracao_admin.router)  # já se autoprotege com exigir_admin no router
-    app.include_router(api_pf.router)  # já se autoprotege com exigir_admin no router
-    app.include_router(simba_alertas_admin.router)  # já se autoprotege com exigir_admin no router
-    app.include_router(documentacao.router)  # já se autoprotege com exigir_admin no router
-    app.include_router(ingestao.router)  # já se autoprotege com exigir_admin no router
-    app.include_router(investigacao.router, dependencies=protegido)
-    app.include_router(ia.router, dependencies=protegido)
-    app.include_router(hipoteses.router, dependencies=protegido)
-    app.include_router(referencia.router, dependencies=protegido)
-    app.include_router(entidades.router, dependencies=protegido)
-    app.include_router(entidades_auto.router, dependencies=protegido)  # escrita da biblioteca exige admin por rota
-    app.include_router(busca.router, dependencies=protegido)
-    app.include_router(busca_automatica.router, dependencies=protegido)
-    app.include_router(padroes.router, dependencies=protegido)  # escrita da biblioteca exige admin por rota
-    app.include_router(documentos.router, dependencies=protegido)
-    app.include_router(rede.router, dependencies=protegido)
-    app.include_router(relatorios.router, dependencies=protegido)  # padrões exigem admin por rota; marcações/geração conferem acesso ao inquérito
-    app.include_router(marcadores.router, dependencies=protegido)  # marcadores são pessoais: cada rota confere o dono além do acesso ao inquérito
-    app.include_router(classificacao_imagem.router, dependencies=protegido)
-    app.include_router(classificacao_imagem.router_admin)  # categorias são configuração global: escrita só de admin
-    app.include_router(ocr_imagem.router, dependencies=protegido)
-    app.include_router(comparar_rosto.router, dependencies=protegido)
-    app.include_router(comparar_celulares.router, dependencies=protegido)
-    app.include_router(correlacao_nuvem.router, dependencies=protegido)
-    app.include_router(jobs.router, dependencies=protegido)  # cada rota resolve o inquérito do job e confere acesso
-    app.include_router(jobs.router_admin)  # já se autoprotege com exigir_admin no router
+app.include_router(servidores.router)  # Administração → Servidores (nós descentralizados)
+app.include_router(no_central.router)  # /api/no/* autenticados por token de nó (ping/heartbeat)
+app.include_router(sistema.router_admin)  # já se autoprotege com exigir_admin no router
+app.include_router(auth.router)
+app.include_router(usuarios.router)  # já se autoprotege com exigir_admin no router
+app.include_router(delegacias.router)  # GET público (lista para cadastro); admin nos demais
+app.include_router(delegacias.router_admin)  # POST/PUT/DELETE exigem admin
+app.include_router(unidades.router_admin)  # árvore de unidades superiores: só Administração
+app.include_router(prompts_entidade.router)  # já se autoprotege com exigir_admin no router
+app.include_router(auditoria_ia.router)  # já se autoprotege com exigir_auditoria no router
+app.include_router(auditoria_acesso.router)  # já se autoprotege com exigir_auditoria no router
+app.include_router(auditoria_usuarios.router)  # já se autoprotege com exigir_auditoria no router
+app.include_router(configuracao_admin.router)  # já se autoprotege com exigir_admin no router
+app.include_router(api_pf.router)  # já se autoprotege com exigir_admin no router
+app.include_router(simba_alertas_admin.router)  # já se autoprotege com exigir_admin no router
+app.include_router(documentacao.router)  # já se autoprotege com exigir_admin no router
+app.include_router(ingestao.router)  # já se autoprotege com exigir_admin no router
+app.include_router(investigacao.router, dependencies=protegido)
+app.include_router(ia.router, dependencies=protegido)
+app.include_router(hipoteses.router, dependencies=protegido)
+app.include_router(referencia.router, dependencies=protegido)
+app.include_router(entidades.router, dependencies=protegido)
+app.include_router(entidades_auto.router, dependencies=protegido)  # escrita da biblioteca exige admin por rota
+app.include_router(busca.router, dependencies=protegido)
+app.include_router(busca_automatica.router, dependencies=protegido)
+app.include_router(padroes.router, dependencies=protegido)  # escrita da biblioteca exige admin por rota
+app.include_router(documentos.router, dependencies=protegido)
+app.include_router(rede.router, dependencies=protegido)
+app.include_router(relatorios.router, dependencies=protegido)  # padrões exigem admin por rota; marcações/geração conferem acesso ao inquérito
+app.include_router(marcadores.router, dependencies=protegido)  # marcadores são pessoais: cada rota confere o dono além do acesso ao inquérito
+app.include_router(classificacao_imagem.router, dependencies=protegido)
+app.include_router(classificacao_imagem.router_admin)  # categorias são configuração global: escrita só de admin
+app.include_router(ocr_imagem.router, dependencies=protegido)
+app.include_router(comparar_rosto.router, dependencies=protegido)
+app.include_router(comparar_celulares.router, dependencies=protegido)
+app.include_router(correlacao_nuvem.router, dependencies=protegido)
+app.include_router(jobs.router, dependencies=protegido)  # cada rota resolve o inquérito do job e confere acesso
+app.include_router(jobs.router_admin)  # já se autoprotege com exigir_admin no router
 
 
 @app.on_event("startup")
@@ -153,50 +146,6 @@ async def _dimensionar_threadpool() -> None:
 @app.on_event("startup")
 def _preparar_banco() -> None:
     import os
-
-    if _PAPEL_NO:
-        # O nó não tem Postgres — nem pool, nem migrações, nem despachante. O único laço de
-        # fundo dele é o heartbeat ao central (mantém o ponto verde e denuncia versão velha).
-        # Antes, varre os .parcial de uploads que morreram no meio do PUT (espelho do que o
-        # central faz com os .ufdr.parciais dele).
-        try:
-            from funcoes.no_utils import limpar_parciais_orfaos_no
-            limpar_parciais_orfaos_no()
-        except Exception:
-            logger.exception("Falha ao varrer .parcial órfãos no nó")
-        try:
-            from funcoes.no_utils import limpar_spools_entrega_orfaos
-            limpar_spools_entrega_orfaos()
-        except Exception:
-            logger.exception("Falha ao varrer spools .entrega órfãos no nó")
-        # e as duas varreduras voltam periodicamente: nó que nunca reinicia não pode
-        # depender do startup para manter o disco limpo
-        try:
-            from funcoes.no_utils import iniciar_varredura_no
-            iniciar_varredura_no()
-        except Exception:
-            logger.exception("Falha ao ligar a varredura periódica do nó")
-        try:
-            from funcoes.no_utils import iniciar_heartbeat_central
-            iniciar_heartbeat_central()
-        except Exception:
-            logger.exception("Falha ao subir o heartbeat do nó")
-        # Túnel NAT: o nó abre um WebSocket ao serviço `tunel` do central para o central conseguir
-        # chamá-lo mesmo atrás de NAT (docs/no_descentralizado.md). Opcional por natureza — sem o
-        # serviço no central, o laço só loga uma vez e tenta de novo em backoff.
-        try:
-            from funcoes.tunel_no import iniciar_tunel_central
-            iniciar_tunel_central()
-        except Exception:
-            logger.exception("Falha ao subir o túnel NAT do nó")
-        # Operário de jobs (OCR/CLIP/facial) puxados do central — a CPU da estação trabalhando na
-        # prova que já está no seu disco (docs/no_descentralizado.md, "jobs no nó").
-        try:
-            from funcoes.no_jobs import iniciar_operario_jobs
-            iniciar_operario_jobs()
-        except Exception:
-            logger.exception("Falha ao subir o operário de jobs do nó")
-        return
 
     abrir_pool()
 

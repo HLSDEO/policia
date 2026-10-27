@@ -23,20 +23,17 @@ sobrevive a NAT):
                                         carrega `cancelar` (é por aí que o "parar" da tela chega
                                         à estação — mesmo desenho dos callbacks da extração)
 
-Intencionalmente FORA do roteamento: `ocr_imagem_selecao` (a seleção da IA tem ≤200 imagens e o
-plano dela nasce no turno do chat — não há ganho em atravessar a rede) e qualquer job de delegacia
-sem nó ativo — sem nó, tudo é exatamente o fluxo de sempre no central.
+O central deste repositório NÃO roda modelos: não há Tesseract, CLIP nem whisper aqui. Todo job
+de imagem nasce para o nó da delegacia do inquérito — sem nó ativo/online a rota RECUSA o job com
+mensagem clara (409). A estação processa o próprio disco e devolve só o resultado.
 
-O interruptor é `JOBS_NO_ATIVO` no .env do central: `0` (padrão — nada muda em ninguém), `ocr`
-(só OCR, que não precisa de modelo de IA no nó) ou `tudo` (inclui CLIP — exige o cache HF no nó,
-ver docker-compose.no.yml).
+`ocr_imagem_selecao` (seleção da IA no chat) segue a mesma regra: vira job OCR no nó.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
-import os
 
 from funcoes import jobs_utils
 from funcoes.db_utils import get_connection
@@ -45,43 +42,22 @@ from funcoes.organizacao_arquivos import PASTA_DADOS
 logger = logging.getLogger(__name__)
 
 # Tipos que podem descer para a estação. OCR é o único que não precisa de modelo no nó.
-TPS_OCR = {jobs_utils.TP_OCR}
+# A seleção da IA (ocr_imagem_selecao) desce como OCR comum filtrado pela lista de ids que o
+# plano resolveu no central (tx_parametros.ids_arquivos) — o nó não precisa conhecer a ferramenta.
+TPS_OCR = {jobs_utils.TP_OCR, jobs_utils.TP_OCR_SELECAO}
 TPS_CLIP = {jobs_utils.TP_CLASSIFICACAO, jobs_utils.TP_COMPARACAO_FACIAL}
 TPS_NO = TPS_OCR | TPS_CLIP
 
 
-def modo() -> str:
-    """Interruptor do recurso (lido a cada decisão, como as outras chaves do .env):
-    0/off/vazio = nunca roteia | ocr = só OCR | tudo = OCR + CLIP."""
-    bruto = ""
-    try:
-        from funcoes.env_utils import parse_env, read_env_text
-
-        bruto = (parse_env(read_env_text()).get("JOBS_NO_ATIVO") or "").strip().lower()
-    except Exception:
-        bruto = (os.getenv("JOBS_NO_ATIVO") or "").strip().lower()
-    if bruto in ("", "0", "off", "nao", "false"):
-        return "off"
-    if bruto in ("tudo", "all", "1", "on", "true", "sim"):
-        return "tudo"
-    if bruto == "ocr":
-        return "ocr"
-    return "off"
-
-
 def habilitado(tp_job: str) -> bool:
-    m = modo()
-    if m == "off":
-        return False
-    if tp_job in TPS_OCR:
-        return True
-    return m == "tudo" and tp_job in TPS_CLIP
+    """Os três tipos de imagem rodam SEMPRE no nó — o central não tem os modelos."""
+    return tp_job in TPS_NO
 
 
 def no_para_job(tp_job: str, id_inquerito: int | None):
-    """O nó que deve rodar este job, ou None (roda no central como sempre). exige: recurso ligado
-    para o tipo + inquérito de delegacia com nó ATIVO e ONLINE (nó offline deixaria o job parado
-    na fila da estação — melhor processar pela ponte como hoje)."""
+    """O nó que deve rodar este job, ou None. None = o job NÃO pode rodar: o central não tem
+    Tesseract/CLIP, e a rota devolve 409 com a causa (nó offline deixaria o job parado na fila
+    da estação — recusar agora é mais honesto do que enfileirar para sempre)."""
     if id_inquerito is None or not habilitado(tp_job):
         return None
     from funcoes import no_utils
@@ -100,6 +76,22 @@ def no_para_job(tp_job: str, id_inquerito: int | None):
     no = no_utils.servidor_ativo_para(row[0])
     if no is None or not no.get("online"):
         return None
+    return no
+
+
+def exigir_no_para_job(tp_job: str, id_inquerito: int | None) -> dict:
+    """O nó do job, ou 409 com a causa: o central não roda os modelos (Tesseract/CLIP/whisper
+    vivem na estação), então sem nó ativo/online o job de imagem simplesmente não pode rodar."""
+    from fastapi import HTTPException
+
+    no = no_para_job(tp_job, id_inquerito)
+    if no is None:
+        from funcoes.no_utils import SEM_NO_ATIVO_MSG
+
+        raise HTTPException(
+            status_code=409,
+            detail="Este processamento roda no servidor da delegacia (nó) — o sistema central "
+                   "não executa OCR, classificação nem comparação facial. " + SEM_NO_ATIVO_MSG)
     return no
 
 
@@ -205,7 +197,7 @@ def plano(id_servidor: int, id_job: int, depois: int = 0, lote: int = 100) -> di
         raise LookupError("job não é deste nó ou já saiu de 'processando'")
     lote = max(1, min(int(lote or 100), _LIMITE_LOTE))
     depois = max(0, int(depois or 0))
-    if job["tp_job"] == jobs_utils.TP_OCR:
+    if job["tp_job"] in (jobs_utils.TP_OCR, jobs_utils.TP_OCR_SELECAO):
         return _plano_ocr(job, depois, lote)
     if job["tp_job"] == jobs_utils.TP_CLASSIFICACAO:
         return _plano_classificacao(job, depois, lote)
@@ -216,6 +208,13 @@ def plano(id_servidor: int, id_job: int, depois: int = 0, lote: int = 100) -> di
 
 def _plano_ocr(job: dict, depois: int, lote: int) -> dict:
     from funcoes.ocr_utils import _BYTES_MIN
+
+    # seleção da IA: a fila é a lista de ids resolvida no central na hora do disparo
+    ids_selecao = None
+    if job["tp_job"] == jobs_utils.TP_OCR_SELECAO:
+        ids_selecao = [int(i) for i in ((job["tx_parametros"] or {}).get("ids_arquivos") or [])]
+        if not ids_selecao:
+            return {"tp": job["tp_job"], "grupos": [], "restantes": 0, "cursor": depois}
 
     query = """SELECT e.no_arquivo, a.id_arquivo, a.co_caminho_zip
                FROM investigacao.arq_tb01_arquivos a
@@ -228,6 +227,9 @@ def _plano_ocr(job: dict, depois: int, lote: int) -> dict:
                  AND a.id_arquivo > %s
                  AND e.id_inquerito = %s"""
     params: list = [_BYTES_MIN, depois, job["id_inquerito"]]
+    if ids_selecao is not None:
+        query += " AND a.id_arquivo = ANY(%s::bigint[])"
+        params.append(ids_selecao)
     if job["id_extracao"] is not None:
         query += " AND a.id_extracao = %s"
         params.append(job["id_extracao"])
@@ -410,7 +412,6 @@ def _facial_finalizar(job: dict, payload: dict, id_servidor: int | None = None) 
     import base64 as b64
 
     import numpy as np
-    import torch
 
     from funcoes.comparar_rosto_utils import (
         _ler_embeddings_salvos, _listar_imagens_inquerito)
@@ -428,13 +429,14 @@ def _facial_finalizar(job: dict, payload: dict, id_servidor: int | None = None) 
         return {"ok": True, "matches": 0}
 
     ref = np.frombuffer(b64.b64decode(ref_b64), dtype="<f2").astype(np.float32)
-    matriz = torch.from_numpy(np.stack([salvos[i["id_arquivo"]] for i in itens]))
-    similaridades = (matriz @ torch.from_numpy(ref)).clamp_(0.0, 1.0)
+    matriz = np.stack([salvos[i["id_arquivo"]] for i in itens]).astype(np.float32)
+    similaridades = np.clip(matriz @ ref, 0.0, 1.0)
     k = min(limite, len(itens))
-    melhores = torch.topk(similaridades, k)
+    ordem = np.argsort(-similaridades)[:k]
     resultados = []
-    for valor, indice in zip(melhores.values.tolist(), melhores.indices.tolist()):
+    for indice in ordem.tolist():
         item = itens[indice]
+        valor = float(similaridades[indice])
         resultados.append({
             "id_arquivo": item["id_arquivo"],
             "no_arquivo": item["no_arquivo"],

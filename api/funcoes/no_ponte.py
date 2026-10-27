@@ -128,6 +128,34 @@ def iniciar_extracao_remota(no: dict, id_extracao: int, no_arquivo: str,
     return res.json()
 
 
+def iniciar_transcricao_remota(no: dict, id_extracao: int, no_arquivo: str,
+                               modelo: str, incluir_video: bool) -> dict:
+    """DELEGA a transcrição dos áudios de uma extração à estação (POST /no/transcrever): o
+    faster-whisper vive no nó, sobre o disco dele. O progresso (fase/progresso/batida), os textos
+    ({"t":"transcricao"}) e o fecho ({"t":"transcricao_fim"}) voltam pelos MESMOS callbacks de
+    estado da extração (rotas/no_central.py → canal_extracao.aplicar_estado)."""
+    res = _post(no, "/no/transcrever", {
+        "id_extracao": id_extracao,
+        "no_arquivo": no_arquivo,
+        "modelo": modelo,
+        "incluir_video": bool(incluir_video),
+    }, timeout=(_TIMEOUT_CONEXAO, 60))
+    if res.status_code == 404:
+        detail = ""
+        try:
+            detail = (res.json() or {}).get("detail", "")
+        except Exception:
+            pass
+        if detail:
+            raise FileNotFoundError(detail)
+        raise NoIndisponivel(
+            f"O servidor {no['no_servidor']} ainda não suporta transcrição remota "
+            "(/no/transcrever) — atualize o nó.")
+    if res.status_code >= 400:
+        _erro_no(res, no)
+    return res.json()
+
+
 def _erro_no(res: requests.Response, no: dict) -> None:
     """401/403/404/500 do nó sempre viram mensagem com o nome do nó — 100 nós sem rótulo no log
     é indecidível."""
@@ -164,6 +192,25 @@ def listar(no: dict, subpasta: str | None, tipo: str) -> list[dict]:
     if res.status_code >= 400:
         _erro_no(res, no)
     return (res.json() or {}).get("arquivos") or []
+
+
+def embed(no: dict, textos: list[str]) -> list[list[float]]:
+    """Gera embeddings NA ESTAÇÃO (POST /no/embed): o central não chama mais o Ollama/API de
+    embeddings — quem carrega o modelo é o nó da delegacia. O nó devolve {"vetores": [[...]]}
+    na mesma ordem dos textos. Protocolo novo: exige o nó em versão que suporte /no/embed
+    (404 vira mensagem clara, não um erro genérico de rede)."""
+    res = _post(no, "/no/embed", {"textos": textos})
+    if res.status_code == 404:
+        raise NoIndisponivel(
+            f"O servidor {no['no_servidor']} ainda não suporta geração de embeddings "
+            "(/no/embed) — atualize o nó para liberar a busca semântica.")
+    if res.status_code >= 400:
+        _erro_no(res, no)
+    vetores = (res.json() or {}).get("vetores") or []
+    if len(vetores) != len(textos):
+        raise NoIndisponivel(f"O servidor {no['no_servidor']} devolveu {len(vetores)} vetores "
+                             f"para {len(textos)} textos.")
+    return vetores
 
 
 def arquivo_existe(no: dict, relativo: str) -> bool:

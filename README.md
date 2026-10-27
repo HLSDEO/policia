@@ -53,9 +53,11 @@ oc start-build analyser-api                  # ...e o pesado em paralelo (fila S
 oc get builds -w                             # acompanhe; Logs no console em Builds → <nome>
 ```
 
-O build da API baixa torch/transformers (~2 GB) — rode de 10 a 40 min. O `completionDeadlineSeconds`
-do YAML já cobre isso. Os ImageStreams de saída (`analyser-*:latest`) são exatamente os que o
-`openshift.yaml` consome — nada para ajustar.
+O build da API é leve agora: o central **não** carrega modelos (sem torch/transformers/
+faster-whisper/pytesseract, sem Tesseract e sem JRE na imagem — eles vivem no nó da delegacia,
+docs/no_descentralizado.md). ffmpeg ficou só para miniaturas. Rode de 1 a 5 min. O
+`completionDeadlineSeconds` do YAML já cobre isso. Os ImageStreams de saída (`analyser-*:latest`)
+são exatamente os que o `openshift.yaml` consome — nada para ajustar.
 
 Se o build do Postgres falhar ao puxar `registry.redhat.io/rhel9/postgresql-16` (cluster sem
 entitlement), edite o BuildConfig `analyser-postgres` e descomente o `buildArgs`
@@ -84,7 +86,8 @@ podman push --authfile=$XDG_RUNTIME_DIR/containers/auth.json -a $REG/$PROJ/analy
 # (ou: podman push ... para cada uma das quatro tags)
 ```
 
-O build da API é pesado (torch CPU + transformers + tesseract + JRE + ffmpeg).
+O build da API é leve (python-slim + psycopg + ffmpeg para miniaturas — os modelos e o JRE moram
+no nó da delegacia).
 O `Dockerfile.postgres` falha **no build** se a tag base não tiver `pgvector` — atualize o tag.
 
 ## 2. Secret `analyser-env`

@@ -489,8 +489,6 @@ def _copiar_pasta_marcada(smbclient, ctx: _CtxCopia, pasta_destino, rel: str) ->
             ctx.estado.falhas.append(f"{caminho_rel}: {exc}")
             continue
         destino = topo.joinpath(*partes)
-        if ctx.no is None:
-            destino.parent.mkdir(parents=True, exist_ok=True)
         if _copiar_arquivo(smbclient, ctx, caminho_rel, destino) is None:
             return False
     return True
@@ -519,16 +517,17 @@ def _executar_copia(id_job: int, usuario_rede: str | None, senha_rede: str | Non
         return
     cancelado = False
     try:
-        # Delegacia com nó ativo: o destino é a estação, não o data/ do central (mesmo
-        # desvio do upload pelo navegador — docs/no_descentralizado.md).
+        # O central não guarda provas: o destino da cópia é SEMPRE a estação (nó) da delegacia
+        # — mesmo desvio do upload pelo navegador (docs/no_descentralizado.md).
         from funcoes import no_utils
         no = no_utils.servidor_ativo_para(delegacia)
-        pasta_destino = Path(str(PASTA_DADOS)) / delegacia
         if no is None:
-            pasta_destino.mkdir(parents=True, exist_ok=True)
-        else:
-            logger.info("Cópia SMB %s desviada para o nó %s (delegacia %s)",
-                        id_job, no["no_servidor"], delegacia)
+            jobs_utils.falhar(id_job, no_utils.SEM_NO_ATIVO_MSG)
+            _desconectar(smbclient, ctx.servidor)
+            return
+        pasta_destino = Path(str(PASTA_DADOS)) / delegacia
+        logger.info("Cópia SMB %s desviada para o nó %s (delegacia %s)",
+                    id_job, no["no_servidor"], delegacia)
         ctx.no = no
         for rel in itens:
             ctx.estado.atual += 1
@@ -640,34 +639,9 @@ def _copiar_arquivo(smbclient, ctx: _CtxCopia, caminho_rel: str, destino) -> "st
             return None
         return str(salvo.get("nome") or destino.name)
 
-    if destino.exists() and destino.is_file():
-        return destino.name  # já copiado (repetição dentro da mesma pasta)
-    tmp = destino.parent / (destino.name + ".part")
-    blocos = 0
-    cancelado_local = False
-    try:
-        with smbclient.open_file(unc, mode="rb") as remoto, open(tmp, "wb") as local:
-            while True:
-                bloco = remoto.read(_BLOCO_REDE)
-                if not bloco:
-                    break
-                local.write(bloco)
-                ctx.estado.bytes_copiados += len(bloco)
-                blocos += 1
-                if blocos % _BLOCOS_POR_BATIMENTO == 0 and _batimento(ctx):
-                    cancelado_local = True
-                    break
-        if not cancelado_local and _batimento(ctx):
-            cancelado_local = True
-        if cancelado_local:
-            tmp.unlink(missing_ok=True)
-            return None
-        # Arquivo vazio na origem: mantém o arquivo vazio (é o que a origem tem).
-        os.replace(tmp, destino)
-        return destino.name
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    # sem nó não há destino: o central não copia prova para o próprio disco
+    raise ErroRedeSmb("a delegacia deste job não tem servidor (nó) ativo — a cópia de rede "
+                      "só existe para levar os arquivos à estação da delegacia")
 
 
 def iniciar_copia(*, caminho_unc: str, itens: list[str], delegacia: str, id_usuario: int,

@@ -1,13 +1,9 @@
-"""Nós descentralizados: registro, tokens, batimento e o papel do processo.
+"""Nós descentralizados: registro, tokens e batimento — a metade CENTRAL do protocolo.
 
-O projeto roda em dois PAPÉIS com o mesmo código (ver docs/no_descentralizado.md):
-
-- `PAPEL=central` (o default): web + API + Postgres, como sempre. É aqui que vive o registro
-  dos nós (`INVESTIGACAO.NO_TB01_SERVIDORES`);
-- `PAPEL=no`: container enxuto de uma delegacia — sem Postgres, sem web. Sobe só as rotas
-  internas `/no/*` (rotas/no_servico.py), que o CENTRAL chama para hashear arquivo, parsear
-  documento, listar e ler bytes da sua pasta data/, e mantém um heartbeat ligado batendo em
-  POST /api/no/ping.
+Este repositório é sempre o CENTRAL (web + API + Postgres + navegação). O código do NÓ de
+delegacia (rotas `/no/*`, operários de extração/jobs, heartbeat de saída) vive em
+repositório próprio (ver docs/no_descentralizado.md); daqui saem só as chamadas da ponte
+(funcoes/no_ponte.py) e entram as entregas dos nós (rotas/no_central.py).
 
 Quem autentica o QUÊ:
 
@@ -20,17 +16,15 @@ Quem autentica o QUÊ:
 
 O roteamento é sempre delegacia → nó (UX110 no vínculo NO_TB02 garante um por unidade; um nó
 pode atender várias delegacias): `servidor_ativo_para()` é a única pergunta que o resto do código
-faz — "esta delegacia tem nó ativo?". Sem nó (ou com o nó inativo, ou com o "Usa o Nó" da
-delegacia desligado), TODO o fluxo é exatamente o de antes: arquivo no data/ do central, execução
-no central. É isso que deixa os nós entrarem um a um, sem tocar nas delegacias que ficaram no
-central.
+faz — "esta delegacia tem nó ativo?". O central deste repositório NÃO importa: sem nó ativo (ou
+com o nó inativo, ou com o "Usa o Nó" da delegacia desligado) os fluxos de importação são
+recusados com mensagem clara — todo processamento acontece na estação.
 """
 
 from __future__ import annotations
 
 import hmac
 import logging
-import os
 import secrets
 import time
 
@@ -43,6 +37,13 @@ logger = logging.getLogger(__name__)
 # Um nó sem batimento há mais de este tempo é tratado como offline pela tela. O heartbeat do
 # nó vem a cada NO_HEARTBEAT_SEGUNDOS (default 60 s), então 3 minutos = 2 batimentos perdidos.
 MINUTOS_NO_ONLINE = 3
+
+# Mensagem única da recusa: o central não importa — toda importação exige o nó da delegacia.
+SEM_NO_ATIVO_MSG = (
+    "Esta delegacia não tem servidor (nó) ativo. O sistema central não importa provas: o envio, "
+    "a extração e o processamento acontecem sempre no servidor da delegacia. Peça ao "
+    "administrador para cadastrar/ativar o nó em Administração → Servidores e ligar o "
+    "\"Usa o Nó\" da delegacia.")
 
 # Cache da pergunta "este NO_ARQUIVO é de algum nó?" (servidor_por_arquivo): dispara a cada anexo
 # lido de uma extração remota, e uma galeria de 100 miniaturas não pode custar 100 SELECTs.
@@ -65,15 +66,6 @@ _COLUNAS = """s.id_servidor, s.no_servidor, s.tx_url_base, s.tx_token, s.tx_vers
 # Um cano sem PING há mais que isto não é mais um cano (o nó bate a cada 30 s; 3 batimentos de
 # folga cobrem um relay ocupado sem segurar um cano morto).
 SEGUNDOS_TUNEL_FRESCO = 120
-
-
-def papel() -> str:
-    """Papel deste processo: 'central' (default) ou 'no'. Lido do .env via PAPEL."""
-    return (os.getenv("PAPEL") or "central").strip().lower()
-
-
-def eh_no() -> bool:
-    return papel() == "no"
 
 
 def gerar_token() -> str:
@@ -185,20 +177,16 @@ def servidor_ativo_para(nome_delegacia: str | None) -> dict | None:
 
 
 def listagem_remota(nome_delegacia: str | None, subpasta: str | None, tipo: str) -> list | None:
-    """Arquivos da pasta de UMA delegacia quando ela tem nó: a pergunta que o seletor da tela
-    faz. None = sem nó (a lista local do central vale); lista vazia = o nó respondeu e está
-    vazia mesmo. Erro de rede devolve None para a rota cair na listagem local em vez de um 500."""
+    """Arquivos da pasta de UMA delegacia: a pergunta que o seletor da tela faz — a pasta mora
+    no NÓ. None = a delegacia não tem nó ativo (a rota recusa a importação e explica); lista
+    vazia = o nó respondeu e está vazia mesmo. Nó fora do ar deixa a exceção da ponte subir
+    (503 com Retry-After no handler global) — não existe mais "cair na lista local"."""
     no = servidor_ativo_para(nome_delegacia)
     if no is None:
         return None
     from funcoes import no_ponte
 
-    try:
-        return no_ponte.listar(no, subpasta, tipo)
-    except Exception:
-        logger.warning("Nó %s inacessível para listar %s (%s); usando o que o central tem",
-                       no.get("no_servidor"), subpasta or "/", tipo)
-        return None
+    return no_ponte.listar(no, subpasta, tipo)
 
 
 def servidor_da_extracao(id_extracao: int) -> dict | None:
@@ -530,233 +518,3 @@ def servidor_por_arquivo(no_arquivo: str) -> dict | None:
         _CACHE_NO_ARQUIVO.clear()
     _CACHE_NO_ARQUIVO[no_arquivo] = (agora, alvo)
     return alvo
-
-
-# ------------------------------------------------------------------ papel "no": heartbeat de saída
-
-
-def limpar_parciais_orfaos_no(idade_minima_segundos: int = 24 * 60 * 60) -> int:
-    """Varre `.parcial` deixados por uploads repassados que morreram no meio (PUT /no/enviar).
-    Espelho do limpar_ufdr_parciais_orfas do central, mas para os nomes que o NOSSO receptor
-    grava (`<token><ext>.parcial`, de qualquer extensão) e sem depender do startup do central —
-    o nó tem o seu. Só os antigos: um upload em andamento não pode ser apagado. Devolve quantos
-    removeu.
-
-    Varredura RECURSIVA de propósito: o organize move os uploads para
-    data/<delegacia>/<inquérito>/<categoria>/ (3+ níveis) — o antigo varrer de 2 níveis nunca
-    enxergava um único .parcial organizado."""
-    import time
-
-    from funcoes.organizacao_arquivos import PASTA_DADOS
-
-    if not PASTA_DADOS.is_dir():
-        return 0
-    agora = time.time()
-    removidos = 0
-    try:
-        candidatas = list(PASTA_DADOS.rglob("*.parcial"))
-    except OSError:
-        return 0
-    for caminho in candidatas:
-        try:
-            if agora - caminho.stat().st_mtime < idade_minima_segundos:
-                continue
-            caminho.unlink()
-            removidos += 1
-            logger.warning("Removido .parcial órfão de upload: %s", caminho)
-        except OSError:
-            logger.exception("Falha ao remover .parcial órfão: %s", caminho)
-    if removidos:
-        logger.info("Uploads .parcial órfãos removidos no nó: %s", removidos)
-    return removidos
-
-
-def limpar_spools_entrega_orfaos(idade_minima_segundos: int = 3 * 24 * 60 * 60) -> int:
-    """Remove pastas .entrega/<id> (data/ ou a reserva em /tmp) de extrações que morreram sem
-    limpar: o `limpar()` do operário só age na passada que termina, e a cauda de uma entrega
-    abortada (erro, queda, quarentena) apodrecia no disco da estação para sempre — lote a
-    lote, dezenas de GB de spool JSONL.
-
-    Pasta com flock VIVO nunca é tocada: o lock é do kernel (morreu o processo, liberado),
-    então um .lock tomado = extração saudável ainda escrevendo ali. A idade mínima é folgada
-    (3 dias): uma extração legítima bate no central a cada 2 min — se nada toca a pasta há
-    3 dias, quem a criou já não existe."""
-    import shutil
-    import tempfile
-    import time
-    from pathlib import Path
-
-    from funcoes.organizacao_arquivos import PASTA_DADOS
-
-    removidos = 0
-    agora = time.time()
-    raizes = [PASTA_DADOS / ".entrega",
-              Path(tempfile.gettempdir()) / "analyser-entrega"]
-    for raiz in raizes:
-        if not raiz.is_dir():
-            continue
-        try:
-            pastas = [p for p in raiz.iterdir() if p.is_dir()]
-        except OSError:
-            continue
-        for pasta in pastas:
-            try:
-                mtimes = [p.stat().st_mtime for p in pasta.rglob("*")] or [pasta.stat().st_mtime]
-                if agora - max(mtimes) < idade_minima_segundos:
-                    continue
-                if _lock_entrega_vivo(pasta):
-                    continue
-                shutil.rmtree(pasta, ignore_errors=True)
-                if not pasta.exists():
-                    removidos += 1
-                    logger.warning("Removido spool de entrega órfão: %s", pasta)
-            except OSError:
-                logger.exception("Falha ao remover spool órfão: %s", pasta)
-    if removidos:
-        logger.info("Spools de entrega órfãos removidos no nó: %s", removidos)
-    return removidos
-
-
-def _lock_entrega_vivo(pasta) -> bool:
-    """True se o .lock da pasta está flockado AGORA (extração viva). O teste adquire e
-    devolve o lock — quem o segurasse de verdade estaria bloqueando aqui, e só há uma
-    extração por pasta."""
-    lock = pasta / ".lock"
-    if not lock.exists():
-        return False
-    try:
-        import fcntl
-    except ImportError:
-        return False  # sem flock (dev Windows): confia só na idade
-    try:
-        fd = os.open(lock, os.O_RDWR)
-    except OSError:
-        return True  # existe e não abre: tratar como vivo é o lado seguro
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    except OSError:
-        return True
-    finally:
-        os.close(fd)
-
-
-def limpar_quarentena_rejeitados(idade_minima_dias: int | None = None) -> int:
-    """A quarentena do lote 422 renomeia o arquivo para `.rejeitado` (prova do veneno) — mas
-    dentro de pasta VIVA nada os tocava: com um central mal-versionado acumulavam para
-    sempre no disco da estação, invisíveis ao spool_estado (que só conta `lote_*.jsonl`).
-    Mantidos `NO_QUARENTENA_DIAS` dias (padrão 14) como evidência consultável — o contador
-    `lote_quarentena` em /no/estado diz o total histórico — e removidos depois com log."""
-    import tempfile
-    import time
-    from pathlib import Path
-
-    from funcoes.organizacao_arquivos import PASTA_DADOS
-
-    try:
-        dias = max(1, int((os.getenv("NO_QUARENTENA_DIAS") or "").strip()
-                          or idade_minima_dias or 14))
-    except ValueError:
-        dias = 14
-    removidos = 0
-    agora = time.time()
-    for raiz in (PASTA_DADOS / ".entrega",
-                 Path(tempfile.gettempdir()) / "analyser-entrega"):
-        if not raiz.is_dir():
-            continue
-        try:
-            candidatos = list(raiz.glob("*/*.rejeitado"))
-        except OSError:
-            continue
-        for arq in candidatos:
-            try:
-                if agora - arq.stat().st_mtime < dias * 86400:
-                    continue
-                if _lock_entrega_vivo(arq.parent):
-                    continue  # a passada que o rejeitou ainda escreve ali
-                arq.unlink()
-                removidos += 1
-                logger.warning("Quarentena expirada (%d dias): removido %s", dias, arq)
-            except OSError:
-                logger.exception("Falha ao remover quarentena: %s", arq)
-    return removidos
-
-
-def iniciar_varredura_no(intervalo_segundos: int = 6 * 60 * 60) -> None:
-    """Só no papel `no`: as varreduras de limpeza também são PERIÓDICAS, não só de startup —
-    um nó que fica semanas de pé sem reiniciar acumulava .parcial de pastas organizadas e
-    spool .entrega de extrações mortas porque nada mais as procurava. Ache barato (um rglob
-    a cada 6 h no disco da estação); o prejuízo de não rodar é disco cheio com a prova em
-    cima."""
-    import threading
-    import time as _t
-
-    def _laco() -> None:
-        while True:
-            for tarefa in (limpar_parciais_orfaos_no, limpar_spools_entrega_orfaos,
-                           limpar_quarentena_rejeitados):
-                try:
-                    tarefa()
-                except Exception:
-                    logger.exception("Varredura periódica do nó falhou (%s)", tarefa.__name__)
-            _t.sleep(intervalo_segundos)
-
-    threading.Thread(target=_laco, daemon=True, name="no-varredura").start()
-
-def iniciar_heartbeat_central() -> None:
-    """Só no papel `no`: thread daemon que bate em POST {CENTRAL_URL}/api/no/ping a cada
-    NO_HEARTBEAT_SEGUNDOS. É o que mantém o ponto verde na tela Administração → Servidores
-    mesmo com o nó ocioso — e o TX_VERSAO que denuncia nó desatualizado."""
-    import threading
-    import time
-
-    import requests
-
-    central_url = (os.getenv("CENTRAL_URL") or "").strip().rstrip("/")
-    token = (os.getenv("NO_TOKEN") or "").strip()
-    if not central_url or not token:
-        logger.warning("Nó sem CENTRAL_URL/NO_TOKEN no .env — heartbeat desligado. "
-                       "Configure-os no .env do nó (ver docs/no_descentralizado.md).")
-        return
-    _avisar_http(central_url)  # o token do heartbeat é o mesmo segredo dos dois sentidos
-    intervalo = max(15, int(os.getenv("NO_HEARTBEAT_SEGUNDOS") or 60))
-
-    def _laco() -> None:
-        atraso = float(intervalo)
-        while True:
-            try:
-                # versão RELIDA a cada batida: o nó se auto-atualiza pelo agente do host e o
-                # container reinicia, mas quando o restart não vem (update travou no meio) o
-                # heartbeat ficava reportando a versão do startup PARA SEMPRE, acendendo a
-                # tela de servidores com a mentira "nó em dia"
-                from funcoes import versao_utils
-                versao = versao_utils.versao_instalada()
-            except Exception:
-                versao = None
-            try:
-                r = requests.post(f"{central_url}/api/no/ping",
-                                  headers={"Authorization": f"Bearer {token}"},
-                                  json={"versao": versao}, timeout=10)
-                if r.status_code in (401, 403):
-                    from funcoes import metricas_no
-                    metricas_no.incr("heartbeat_recusado")
-                    # token revogado / nó inativado NÃO se conserta batendo mais: sobe o
-                    # atraso até 15 min (o log fala uma vez por fase de queda, como o túnel)
-                    if atraso == float(intervalo):
-                        logger.error("Central recusou o heartbeat (%s) — token revogado ou nó "
-                                     "inativado. Refaça o cadastro na tela Servidores.",
-                                     r.status_code)
-                    atraso = min(900.0, max(300.0, atraso * 2))
-                else:
-                    atraso = float(intervalo)
-            except Exception:
-                from funcoes import metricas_no
-                metricas_no.incr("heartbeat_falhas")
-                logger.warning("Heartbeat do nó falhou (central fora do ar?) — tentando de novo "
-                               "em %s s", intervalo)
-                atraso = float(intervalo)
-            time.sleep(atraso)
-
-    threading.Thread(target=_laco, daemon=True, name="no-heartbeat").start()
-    logger.info("Heartbeat do nó ligado: central %s, a cada %s s", central_url, intervalo)

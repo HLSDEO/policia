@@ -1,54 +1,38 @@
 # -*- coding: utf-8 -*-
-"""Canal de extração — separa ONDE a pipeline grava o que ela produz.
+"""Canal de extração — a metade CENTRAL do canal de entrega dos nós.
 
-Modo normal (central): as funções de escrita de `investigacao_utils` gravam direto no
-banco (cursor real), exatamente como sempre funcionaram — este módulo fica inerte.
+O nó processa o .ufdr na SUA CPU e não tem banco nenhum. Cada escritor de domínio da
+pipeline, em vez do INSERT, EMITE um registro JSON com o mesmo dict natural que receberia
+(conversas, mensagens, contatos... — nenhum id gerado no banco atravessa o canal). Os
+registros viram LOTES JSONL no disco do nó, que sobem ao central em sequência; o central
+REPRÓDUZ cada registro chamando a MESMA função de gravação local (REPLAY abaixo) — mesma
+SQL, mesmo ON CONFLICT, mesmo dedup. O `id_extracao` é criado no central e usado igual nos
+dois lados, então não há remapeamento.
 
-Modo entrega (nó, docs/no_descentralizado.md): o nó processa o .ufdr na SUA CPU e não tem
-banco nenhum. Cada escritor de domínio, em vez do INSERT, EMITE um registro JSON com o
-mesmo dict natural que receberia (conversas, mensagens, contatos... — nenhum id gerado
-no banco atravessa o canal, ver o mapa de RETURNING: ids de conversa/mensagem/anexo só
-servam dentro da própria função). Os registros viram LOTES JSONL no disco do nó, que
-sobem ao central em sequência; o central REPRÓDUZ cada registro chamando a MESMA função
-de gravação local (REPLAY abaixo) — mesma SQL, mesmo ON CONFLICT, mesmo dedup. O
-`id_extracao` é criado no central e usado igual nos dois lados, então não há remapeamento.
-
-A pipeline ativa o emissor via contextvar no thread do worker (`emissor_ativo`). Emissor
-ausente = comportamento IDÊNTICO ao de sempre no central.
+O EMISSOR (CanalEntrega/spool/entrega) roda no nó — e o código do nó vive em repositório
+próprio. Aqui ficam o RECEBEDOR (`reproduzir_lote`, `aplicar_estado`) e os guards inertes
+(`emitir`/`estado_agora`), que no central nunca encontram canal ativo: os escritores de
+`investigacao_utils` gravam direto no banco, como sempre.
 """
 import base64
-import contextlib
 import contextvars
 import datetime
 import decimal
 import json
 import logging
-import os
-import threading
-import time
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------------- emissor
 
-_EMISSOR: contextvars.ContextVar["CanalEntrega | None"] = contextvars.ContextVar("canal_emissor", default=None)
+_EMISSOR: contextvars.ContextVar[object | None] = contextvars.ContextVar("canal_emissor", default=None)
 
 
 def emissor_ativo():
     return _EMISSOR.get()
 
 
-@contextlib.contextmanager
-def emissor(canal: "CanalEntrega"):
-    token = _EMISSOR.set(canal)
-    try:
-        yield canal
-    finally:
-        _EMISSOR.reset(token)
-
-
-def ativar(canal: "CanalEntrega"):
+def ativar(canal):
     """Para threads de worker dedicadas (a pipeline roda em thread própria): ativa o canal
     e devolve o token para `desativar` no finally."""
     return _EMISSOR.set(canal)
@@ -84,18 +68,6 @@ def estado_agora(payload: dict) -> bool:
 
 # ----------------------------------------------------------------------------- JSON seguro
 
-def _enc(o):
-    if isinstance(o, (datetime.datetime, datetime.date, datetime.time)):
-        return {"__dt__": o.isoformat()}
-    if isinstance(o, decimal.Decimal):
-        return {"__dec__": str(o)}
-    if isinstance(o, (bytes, bytearray)):
-        return {"__b64__": base64.b64encode(bytes(o)).decode()}
-    if isinstance(o, (set, frozenset)):
-        return {"__set__": list(o)}
-    raise TypeError(f"tipo não serializável no canal: {type(o)}")
-
-
 def _dec(o):
     if isinstance(o, dict) and len(o) == 1:
         if "__dt__" in o:
@@ -116,256 +88,6 @@ def _dec(o):
     if isinstance(o, list):
         return [_dec(v) for v in o]
     return o
-
-
-# ----------------------------------------------------------------------------- canal
-
-_LOTE_REGISTROS = 2000
-_LOTE_BYTES = 8 * 1024 * 1024
-_TIPOS_AUDIO = ("audio",)
-_TIPOS_VIDEO = ("video",)
-
-
-class CanalEntrega:
-    """Acumula os registros da pipeline em lotes JSONL no disco do nó e entrega ao central.
-
-    A entrega é SEMPRE persistente antes do envio: o lote N+1 só pode ser enviado com o N
-    confirmado (a fila de reenvio fica no disco — `lote_*.jsonl` sem ack). Estados (fase,
-    progresso, batida, hashes, contagens, finalizar) não esperam lote: vão imediatamente
-    por `enviar_estado`, que é o que mantém a tela do central viva e o vigia quieto.
-    """
-
-    # (modelo, transcrever_video) escolhido na tela — chega pelo POST /no/extrair, é o que
-    # _obter_config_transcricao devolve no modo entrega (não há banco no nó)
-    config_transcricao: tuple | None = None
-    # número do inquérito (também vem pelo /no/extrair): é o destino do organize do nó
-    numero_inquerito: str | None = None
-
-    def __init__(self, id_extracao: int, pasta: Path,
-                 enviar_lote, enviar_estado, lote_max: int = _LOTE_REGISTROS):
-        self.id_extracao = id_extracao
-        self.pasta = Path(pasta)
-        self.pasta.mkdir(parents=True, exist_ok=True)
-        self._enviar_lote = enviar_lote
-        self._enviar_estado = enviar_estado
-        self._lote_max = lote_max
-        self._buf: list[dict] = []
-        self._bytes = 0
-        self._seq = 0                      # lote em geração
-        self._ack = 0                      # próximo lote a enviar/aguardar
-        self._trava = threading.Lock()
-        self.audios_pendentes: list[dict] = []   # p/ transcrição local (Fase 3)
-        self._cancelar = False
-        # Event externo de cancelamento (troca de geração no redespacho — no_extracao.aceitar)
-        self._cancelar_extra: threading.Event | None = None
-        self._ult_cancel_chk = 0.0
-        self._recuperar_seq()
-
-    # -- retomada: lotes no disco sem ack voltam à fila na mesma ordem ------------------
-    def _arquivo_lote(self, seq: int) -> Path:
-        return self.pasta / f"lote_{seq:06d}.jsonl"
-
-    def _recuperar_seq(self) -> None:
-        existe = sorted(p.name for p in self.pasta.glob("lote_*.jsonl"))
-        if existe:
-            self._seq = int(existe[-1].split("_")[1].split(".")[0]) + 1
-
-    # -- geração --------------------------------------------------------------------------
-    def emitir(self, tipo: str, args: tuple) -> None:
-        registro = {"t": tipo, "a": list(args)}
-        if tipo == "conversa":
-            self._registrar_audios(args, prefixo=args[0])
-        elif tipo == "conversa_msg":
-            self._registrar_audios(args, prefixo="msg")
-        linha = json.dumps(registro, ensure_ascii=False, default=_enc)
-        with self._trava:
-            self._buf.append(linha)
-            self._bytes += len(linha) + 1
-            if len(self._buf) >= self._lote_max or self._bytes >= _LOTE_BYTES:
-                self._fechar_lote_travado()
-
-    def _registrar_audios(self, args: tuple, prefixo: str) -> None:
-        """Guarda os anexos de áudio (e vídeo) dos chats emitidos — a transcrição LOCAL do
-        nó (Fase 3) percorre esta lista no lugar do SELECT de pendentes do central. Os
-        guards passam o dict `chat` na POSIÇÃO 2 dos args (conversa: prefixo, ide, chat;
-        conversa_msg: ide, app, chat) e o prefixo de tabela chega por parâmetro."""
-        chat = args[2] if len(args) > 2 and isinstance(args[2], dict) else None
-        if chat is None:
-            return
-        for msg in chat.get("mensagens") or ():
-            for anexo in msg.get("anexos") or ():
-                tipo_c = (anexo.get("tipo_conteudo") or "").lower()
-                caminho = anexo.get("caminho_zip")
-                if (caminho and not caminho.startswith("IPED::")
-                        and not anexo.get("transcricao")
-                        and (tipo_c.startswith("audio") or tipo_c.startswith("video"))):
-                    self.audios_pendentes.append({"prefixo": prefixo, "caminho_zip": caminho,
-                                                  "tipo": tipo_c})
-
-    def _fechar_lote_travado(self) -> None:
-        if not self._buf:
-            return
-        seq = self._seq
-        destino = self._arquivo_lote(seq)
-        # Escrita ATÔMICA (tmp + fsync + replace): um write_text interrompido no meio
-        # (queda de energia, disco cheio) deixava uma linha JSON truncada definitiva — o
-        # central rejeitava o lote para sempre e a extração travava em 'processando'.
-        tmp = destino.with_name(destino.name + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write("\n".join(self._buf))
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, destino)
-        self._seq = seq + 1
-        self._buf = []
-        self._bytes = 0
-
-    def commit(self) -> None:
-        """Equivalente ao conn.commit() do laço: no modo entrega, fecha o lote corrente e
-        aciona o envio dos pendentes (o envio é assíncrono/backoff por conta do chamador)."""
-        with self._trava:
-            self._fechar_lote_travado()
-        self.enviar_pendentes()
-
-    # -- entrega --------------------------------------------------------------------------
-    def enviar_pendentes(self) -> None:
-        """Envia, EM ORDEM, os lotes escritos no disco ainda sem ack. O central responde o
-        maior seq já processado (retomada: o que ele já tem é pulado sem reenviar). Erro de
-        rede interrompe a tentativa — os lotes seguem no disco para a próxima chamada."""
-        while self._ack < self._seq:
-            arquivo = self._arquivo_lote(self._ack)
-            if not arquivo.exists():
-                return
-            corpo = arquivo.read_bytes()
-            try:
-                novo_ack = self._enviar_lote(self._ack, corpo)
-            except Exception as exc:
-                from funcoes import metricas_no
-                metricas_no.incr("lote_reenvios")
-                logger.warning("entrega lote %s falhou (tentará de novo): %s", self._ack, exc)
-                return
-            if novo_ack is not None and novo_ack >= self._ack:
-                # confirmado até novo_ack: apaga os entregues e avança
-                for seq in range(self._ack, novo_ack + 1):
-                    self._arquivo_lote(seq).unlink(missing_ok=True)
-                self._ack = novo_ack + 1
-            else:
-                return
-
-    # -- estado (fase/progresso/batida/hashes/contagens/finalizar) ------------------------
-    def estado(self, payload: dict) -> None:
-        try:
-            resposta = self._enviar_estado(payload)
-        except Exception as exc:
-            # fire-and-forget de verdade, mas NUNCA mudo: um 'finalizar' que não chega deixa
-            # o central em 'processando' até o vigia de 60 min — sem este log, invisível
-            from funcoes import metricas_no
-            metricas_no.incr("estado_falhos")
-            logger.warning("Callback de estado %r da extração %s não chegou ao central: %s",
-                           payload.get("t"), self.id_extracao, exc)
-            return
-        if isinstance(resposta, dict):
-            self._cancelar = bool(resposta.get("cancelar"))
-            self._ult_cancel_chk = time.time()
-
-    @property
-    def cancelar(self) -> bool:
-        # _cancelar_extra: ordem de troca de geração (o central redespachou esta mesma
-        # extração enquanto esta passada ainda vivia — ver no_extracao.aceitar)
-        return self._cancelar or (self._cancelar_extra is not None
-                                  and self._cancelar_extra.is_set())
-
-    # -- encerramento -----------------------------------------------------------------------
-    def finalizar(self, relatorio: dict) -> None:
-        """Fecha o último lote, entrega tudo (com retry de até 10 min) e manda o relatório
-        final. Se o central não confirmar tudo nesse prazo a extração é dada como erro —
-        nunca 'concluída' com dados parcialmente entregues."""
-        with self._trava:
-            self._fechar_lote_travado()
-        limite = time.time() + 600
-        while self._ack < self._seq and time.time() < limite:
-            antes = self._ack
-            self.enviar_pendentes()
-            if self._ack == antes:
-                time.sleep(5)
-        if self._ack < self._seq:
-            raise RuntimeError(
-                "O central não confirmou a entrega de todos os lotes desta extração "
-                "(rede instável ou central fora do ar). Os lotes ficaram gravados na pasta "
-                ".entrega do nó; rode de novo quando a conexão voltar.")
-        self._enviar_estado({"t": "finalizar", **relatorio})
-
-
-class ConnFalsa:
-    """Substitui a conexão longa do laço no modo entrega: commit fecha lote, nada de banco."""
-
-    def __init__(self, canal: CanalEntrega):
-        self._canal = canal
-
-    def commit(self) -> None:
-        self._canal.commit()
-
-    def rollback(self) -> None:
-        pass
-
-    def cursor(self):
-        return _CursorFalso()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-class _CursorFalso:
-    def execute(self, *a, **k):
-        raise RuntimeError("cursor falso: o modo entrega não pode consultar o banco "
-                           "(falta um guard de canal em alguma função da pipeline)")
-
-    executemany = copy = executemany_block = fetchone = fetchall = nextset = execute
-
-    def close(self):
-        pass
-
-
-class BatimentoPonte:
-    """_Batimento do nó: fase/progresso/batida viram callbacks ao central; cancelamento
-    vem da resposta do próprio callback (cache de 2 s, igual ao SELECT do central)."""
-
-    def __init__(self, canal: CanalEntrega):
-        self.canal = canal
-        self._thread: threading.Thread | None = None
-        self._parar = threading.Event()
-        self._ultimo_pct = -1
-
-    def iniciar_vigia(self) -> None:
-        def vigia():
-            while not self._parar.wait(120):
-                self.canal.estado({"t": "batida"})
-        self._thread = threading.Thread(target=vigia, daemon=True, name="batimento-ponte")
-        self._thread.start()
-
-    def parar_vigia(self) -> None:
-        self._parar.set()
-
-    def fase(self, nome: str) -> None:
-        self._ultimo_pct = -1
-        self.canal.estado({"t": "fase", "cd_fase": nome, "qt_progresso_fase": None})
-
-    def progresso(self, feitos: float, total: float) -> None:
-        if not total:
-            return
-        pct = min(99, max(0, int(feitos * 100 / total)))
-        if pct == self._ultimo_pct:
-            return
-        self._ultimo_pct = pct
-        self.canal.estado({"t": "progresso", "qt_progresso_fase": pct})
-
-    def cancelar_pedido(self) -> bool:
-        if time.time() - self.canal._ult_cancel_chk > 2:
-            self.canal.estado({"t": "batida"})
-        return self.canal.cancelar
 
 
 # ----------------------------------------------------------------------------- replay (central)
@@ -531,6 +253,21 @@ def aplicar_estado(id_extracao: int, payload: dict) -> dict:
                         "qt_progresso_fase = NULL, tx_erro = %s, dt_fim_processamento = now() "
                         "WHERE id_extracao = %s AND cd_status = 'processando'",
                         (str(payload.get("mensagem"))[:2000], id_extracao))
+        elif t == "transcricao":
+            # texto de um áudio transcrito na estação (botão "Transcrever" rodando no nó):
+            # grava nos anexos desta extração cujo binário é o caminho_zip (mesma função do replay)
+            IU = _fu()
+            IU._aplicar_transcricao(cur, payload.get("prefixo"), id_extracao,
+                                    payload.get("caminho_zip"), payload.get("texto"))
+        elif t == "transcricao_fim":
+            # fecho da transcrição remota: devolve a extração a 'concluido' somando os transcritos
+            # da rodada (mesmo UPDATE do worker local que não existe mais no central)
+            cur.execute("UPDATE investigacao.inq_tb02_extracoes SET cd_status = 'concluido', "
+                        "cd_fase = NULL, qt_progresso_fase = NULL, dt_fim_processamento = now(), "
+                        "tx_aviso = %s, qt_audios_transcritos = coalesce(qt_audios_transcritos, 0) + %s "
+                        "WHERE id_extracao = %s AND cd_status = 'processando'",
+                        ((str(payload.get("aviso"))[:2000] if payload.get("aviso") else None),
+                         int(payload.get("qt") or 0), id_extracao))
         conn.commit()
         cur.execute("SELECT fl_cancelar FROM investigacao.inq_tb02_extracoes WHERE id_extracao = %s",
                     (id_extracao,))

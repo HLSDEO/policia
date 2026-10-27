@@ -231,6 +231,13 @@
     if (kind === "error" && text && window.Toast) Toast.erro(text);
   }
 
+  // O central responde 409 com o motivo quando a delegacia não tem nó ativo (o processamento
+  // é todo do nó) — o seletor mostra exatamente o texto do servidor, não um "erro" genérico.
+  function detalheErro(xhr, padrao) {
+    var d = xhr && xhr.responseJSON && xhr.responseJSON.detail;
+    return (typeof d === "string" && d) ? d : padrao;
+  }
+
   function carregarArquivos() {
     var params = delegaciaAtual ? { delegacia: delegaciaAtual } : {};
     return $.getJSON("/api/investigacao/arquivos", params).done(function (arquivos) {
@@ -248,9 +255,9 @@
           $("<option>").val(a.nome).text(a.nome + " (" + formatarBytes(a.tamanho_bytes) + ")")
         );
       });
-    }).fail(function () {
-      $arquivoSelect.empty().append($("<option>").val("").text("Erro ao carregar .ufdr"));
-      $("#arquivo-help").text("Não foi possível listar os arquivos.");
+    }).fail(function (xhr) {
+      $arquivoSelect.empty().append($("<option>").val("").text("Indisponível no central"));
+      $("#arquivo-help").text(detalheErro(xhr, "Não foi possível listar os arquivos."));
     });
   }
 
@@ -277,12 +284,12 @@
         if (a.eh_zip) rotulo += " [ZIP — expande e importa tudo]";
         return { value: a.nome, text: rotulo };
       }));
-    }).fail(function () {
+    }).fail(function (xhr) {
       tsDocumento.clear();
       tsDocumento.clearOptions();
-      tsDocumento.settings.placeholder = "Erro ao carregar documentos";
+      tsDocumento.settings.placeholder = "Indisponível no central";
       tsDocumento.inputState();
-      $("#documento-help").text("Não foi possível listar os documentos.");
+      $("#documento-help").text(detalheErro(xhr, "Não foi possível listar os documentos."));
     });
   }
 
@@ -310,9 +317,9 @@
           $("<option>").val(r.pasta).text(r.pasta + (extra ? " (" + extra + ")" : ""))
         );
       });
-    }).fail(function () {
-      $rifSelect.empty().append($("<option>").val("").text("Erro ao carregar RIFs"));
-      $("#rif-help").text("Não foi possível listar as pastas de RIF.");
+    }).fail(function (xhr) {
+      $rifSelect.empty().append($("<option>").val("").text("Indisponível no central"));
+      $("#rif-help").text(detalheErro(xhr, "Não foi possível listar as pastas de RIF."));
     });
   }
 
@@ -333,9 +340,9 @@
           $("<option>").val(a.nome).text(a.nome + " (" + formatarBytes(a.tamanho_bytes) + ")")
         );
       });
-    }).fail(function () {
-      $simbaSelect.empty().append($("<option>").val("").text("Erro ao carregar SIMBA"));
-      $("#simba-help").text("Não foi possível listar os arquivos R304.");
+    }).fail(function (xhr) {
+      $simbaSelect.empty().append($("<option>").val("").text("Indisponível no central"));
+      $("#simba-help").text(detalheErro(xhr, "Não foi possível listar os arquivos R304."));
     });
   }
 
@@ -343,15 +350,15 @@
     var params = delegaciaAtual ? { delegacia: delegaciaAtual } : {};
     var pDisponivel = $.getJSON("/api/investigacao/iped-disponivel").done(function (r) {
       if (r.disponivel) return;
-      $ipedSelect.empty().append($("<option>").val("").text("Java indisponível nesta instalação"));
+      $ipedSelect.empty().append($("<option>").val("").text("Indisponível — rodará no nó"));
       $ipedBtn.prop("disabled", true);
-      $("#iped-help").text("O servidor precisa de um JRE para ler casos do IPED — avise o administrador.");
+      $("#iped-help").text(r.motivo || "Importação IPED indisponível neste servidor.");
     }).fail(function () {
       // silencioso: a listagem principal ainda tenta carregar
     });
     var pLista = $.getJSON("/api/investigacao/iped-disponiveis", params).done(function (pastas) {
-      // Se Java indisponível já preencheu, não sobrescreve
-      if ($("#iped-help").text().indexOf("JRE") !== -1) return;
+      // Se o aviso "indisponível no central" já preencheu, não sobrescreve
+      if ($("#iped-help").text().indexOf("central") !== -1) return;
       $ipedSelect.empty();
       if (!pastas.length) {
         $ipedSelect.append($("<option>").val("").text("Nenhuma pasta de caso do IPED em data/"));
@@ -382,7 +389,7 @@
     $ipedContaInput.val("");
     $ipedContaCampo.addClass("hidden").attr("hidden", "");
     if (!pasta) {
-      $("#iped-help").text($("#iped-help").text().indexOf("JRE") !== -1 ? $("#iped-help").text() : "");
+      $("#iped-help").text($("#iped-help").text().indexOf("central") !== -1 ? $("#iped-help").text() : "");
       $ipedBtn.prop("disabled", $ipedSelect.find("option").length === 1 && $ipedSelect.find("option").first().val() === "");
       ipedDetectando = false;
       return;

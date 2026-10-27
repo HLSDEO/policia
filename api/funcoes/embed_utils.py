@@ -104,18 +104,38 @@ def _garantir_modelo_local() -> None:
     _post(f"{base}/api/pull", {}, {"name": modelo, "stream": False}, timeout=_TIMEOUT_PULL)
 
 
-def gerar_embeddings(textos: list[str]) -> list[list[float]]:
-    """Gera os vetores de uma lista de textos via a API de embeddings configurada (formato OpenAI)."""
+def no_para_embed(id_inquerito: int):
+    """O nó da delegacia do inquérito, ativo e online — quem gera os embeddings. O central deste
+    repositório não chama Ollama/API de embeddings: o modelo vive na estação (docs/
+    no_descentralizado.md). None = sem nó: a indexação recusa, a busca degrada para aviso."""
+    from funcoes import no_utils
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT no_delegacia FROM investigacao.inq_tb01_inqueritos "
+                            "WHERE id_inquerito = %s", (id_inquerito,))
+                row = cur.fetchone()
+    except Exception:
+        logger.exception("Falha ao resolver a delegacia do inquérito %s para embeddings",
+                         id_inquerito)
+        return None
+    if not row or not row[0]:
+        return None
+    no = no_utils.servidor_ativo_para(row[0])
+    if no is None or not no.get("online"):
+        return None
+    return no
+
+
+def gerar_embeddings(textos: list[str], no: dict) -> list[list[float]]:
+    """Gera os vetores de uma lista de textos NO NÓ da delegacia (POST /no/embed — é lá o modelo
+    de embeddings). A ordem volta igual à dos textos."""
     if not textos:
         return []
-    url, modelo, chave, contexto = _config_embed()
-    cabecalhos = {"Authorization": f"Bearer {chave}"} if chave else {}
-    resp = _post(
-        f"{url.rstrip('/')}/embeddings", cabecalhos, {"model": modelo, "input": textos},
-        contexto_ssl=contexto,
-    )
-    dados = sorted(resp["data"], key=lambda d: d.get("index", 0))
-    return [d["embedding"] for d in dados]
+    from funcoes import no_ponte
+
+    return no_ponte.embed(no, textos)
 
 
 # --- Indexação em background --------------------------------------------------
@@ -268,20 +288,21 @@ def _liberar_indexacoes_travadas(id_inquerito: int) -> None:
         conn.commit()
 
 
-def embeddings_configurados() -> bool:
-    """True se a busca semântica está configurada (modelo de embeddings definido, URL quando via API).
-    Usado para decidir se a extração encadeia a indexação automática sem levantar erro."""
-    try:
-        _config_embed()
-        return True
-    except ErroProvedorIA:
-        return False
+def embeddings_configurados(id_inquerito: int) -> bool:
+    """True se a busca semântica PODE rodar para este inquérito: a delegacia tem nó ativo/online
+    (é a estação que gera os embeddings). Usado para decidir se a extração encadeia a indexação
+    automática sem levantar erro."""
+    return no_para_embed(id_inquerito) is not None
 
 
 def _criar_linha_indexacao(id_inquerito: int) -> int:
     """Cria a linha de indexação (trava por inquérito via índice único parcial); devolve o id.
-    Levanta ErroProvedorIA se não configurado e IndexacaoOcupada se já houver uma ativa."""
-    _config_embed()  # falha cedo, com mensagem clara, se não estiver configurado
+    Levanta ErroProvedorIA se o inquérito não tiver nó ativo e IndexacaoOcupada se já houver
+    uma ativa."""
+    from funcoes.no_utils import SEM_NO_ATIVO_MSG
+
+    if no_para_embed(id_inquerito) is None:
+        raise ErroProvedorIA(SEM_NO_ATIVO_MSG)
     _liberar_indexacoes_travadas(id_inquerito)
     try:
         with get_connection() as conn:
@@ -520,11 +541,17 @@ def _processar_indexacao(id_indexacao: int, id_inquerito: int,
             _atualizar_indexacao(id_indexacao, "cd_status = 'cancelado', dt_fim = now()", (),
                                  com_guarda_status=True)
             return
-        _garantir_modelo_local()  # no modo local, baixa o modelo no Ollama se ainda não houver
+        # os vetores são gerados NA ESTAÇÃO (POST /no/embed) — o modelo de embeddings vive no
+        # nó da delegacia, não no central
+        no = no_para_embed(id_inquerito)
+        if no is None:
+            from funcoes.no_utils import SEM_NO_ATIVO_MSG
+
+            raise ErroProvedorIA(SEM_NO_ATIVO_MSG)
 
         # sonda a dimensão do modelo atual e põe coluna + índice nesse estado (modelo trocado desde
         # a última indexação: os vetores velhos são descartados e re-embeddados, não ficam presos)
-        dim_atual = len(gerar_embeddings(["."])[0])
+        dim_atual = len(gerar_embeddings(["."], no)[0])
         _garantir_dimensao(dim_atual)
 
         total = _contar_pendentes(id_inquerito)
@@ -548,10 +575,10 @@ def _processar_indexacao(id_indexacao: int, id_inquerito: int,
                         chaves[chave] = len(distintos)
                         distintos.append(r["texto"])
                     posicoes.append(chaves[chave])
-                vetores_distintos = gerar_embeddings(distintos)
+                vetores_distintos = gerar_embeddings(distintos, no)
                 vetores = [vetores_distintos[i] for i in posicoes]
             else:
-                vetores = gerar_embeddings([r["texto"] for r in lote])
+                vetores = gerar_embeddings([r["texto"] for r in lote], no)
             with get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.executemany(
@@ -645,7 +672,18 @@ def buscar_semelhantes(id_inquerito: int, consulta: str, limite: int = 20) -> di
     if not consulta:
         return {"resultados": [], "aviso": "Consulta vazia."}
 
-    q = _formatar_vetor(gerar_embeddings([consulta])[0])
+    # o vetor da pergunta é gerado no nó da delegacia; sem nó (ou fora do ar) a busca semântica
+    # degrada para aviso — a busca literal e o resto do RAG continuam funcionando
+    from funcoes.no_utils import SEM_NO_ATIVO_MSG
+    from funcoes.no_ponte import NoIndisponivel
+
+    no = no_para_embed(id_inquerito)
+    if no is None:
+        return {"resultados": [], "aviso": SEM_NO_ATIVO_MSG}
+    try:
+        q = _formatar_vetor(gerar_embeddings([consulta], no)[0])
+    except (ErroProvedorIA, NoIndisponivel) as exc:
+        return {"resultados": [], "aviso": f"Busca semântica indisponível: {exc}"}
 
     try:
         with get_connection() as conn:

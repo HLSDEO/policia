@@ -147,105 +147,14 @@ def _executar_importacao_zip(id_job: int, arquivo: str, id_inquerito: int, nu_in
 
     arquivos = expansao["arquivos"]
     finalizar = expansao["finalizar"]
-    # RIFs avulsos no ZIP (CSVs soltos, sem pasta): agrupa por número e importa como
-    # RIF estruturado em vez de documento genérico (caso 2024.0081190: 4 RIFs viraram
-    # OUTROS). Só vale para arquivos locais — no nó remoto, montar_pasta levanta
-    # FileNotFoundError e o grupo cai de volta para o fluxo genérico abaixo.
+    # RIFs avulsos no ZIP entram como documento genérico: o parse estruturado de RIF roda no
+    # servidor da delegacia (nó) e está bloqueado no central até o nó suportar — o central não
+    # monta pasta nem parseia nada no próprio disco.
     rifs_importados: list[dict] = []
-    try:
-        from funcoes.rif_utils import (
-            montar_pasta_grupo_rif,
-            separar_grupos_rif_avulsos,
-        )
-        from funcoes.investigacao_utils import PASTA_DADOS
-
-        grupos_rif, arquivos = separar_grupos_rif_avulsos(arquivos)
-    except Exception:
-        logger.exception("Falha ao separar grupos de RIF do ZIP %s (job %s)", arquivo, id_job)
-        grupos_rif, arquivos = {}, arquivos
-    if grupos_rif:
-        try:
-            from funcoes.rif_utils import importar_rif
-        except Exception:
-            logger.exception("Falha ao carregar importar_rif (job %s)", id_job)
-            grupos_rif = {}
-    cancelado_pre = False
-    for nu_rif in sorted(grupos_rif):
-        grupo = grupos_rif[nu_rif]
-        if jobs_utils.progresso(id_job, processados=0,
-                                 metricas={"fase": "importando", "atual": f"RIF {nu_rif}"}):
-            # cancelado antes dos genéricos: guarda o parcial com o que já entrou
-            cancelado_pre = True
-            break
-        try:
-            pasta_rif = montar_pasta_grupo_rif(nu_rif, grupo, subpasta)
-            res_rif = importar_rif(pasta_rif, nu_inquerito, id_usuario, subpasta=subpasta,
-                                   delegacia=delegacia, in_caso_inteligencia=caso_inteligencia)
-            rifs_importados.append({"nu_rif": res_rif.get("nu_rif") or nu_rif,
-                                    "id_rif": res_rif.get("id_rif"),
-                                    "qt_comunicacoes": res_rif.get("qt_comunicacoes", 0),
-                                    "qt_envolvidos": res_rif.get("qt_envolvidos", 0),
-                                    "qt_ocorrencias": res_rif.get("qt_ocorrencias", 0)})
-            # sucesso: os soltos eram só staging (a cópia já está no RIF/ organizado) —
-            # remove para não virarem documento genérico duplicado abaixo
-            base_docs = PASTA_DADOS / subpasta if subpasta else PASTA_DADOS
-            for nome_solto in grupo.values():
-                try:
-                    (base_docs / nome_solto).unlink(missing_ok=True)
-                except Exception:
-                    logger.exception("Falha ao remover solto %s do RIF %s (job %s)",
-                                     nome_solto, nu_rif, id_job)
-        except (FileNotFoundError, ValueError) as exc:
-            # nó remoto (sem arquivo local) ou pasta inválida: cai para genérico abaixo,
-            # para não perder a prova — o motivo fica em falhas
-            logger.warning("RIF %s do ZIP %s vai como genérico: %s", nu_rif, arquivo, exc)
-            # devolve os arquivos do grupo à fila genérica, uma vez só
-            for nome_solto in grupo.values():
-                if nome_solto not in arquivos:
-                    arquivos.append(nome_solto)
-            try:
-                from funcoes.rif_utils import _subpasta_rif as _sub_rif
-                import shutil as _shutil
-                for sufixo_cand in ("", " (2)", " (3)"):
-                    cand = _sub_rif(subpasta) / f"RIF_{nu_rif}_zip{sufixo_cand}"
-                    if cand.is_dir():
-                        _shutil.rmtree(cand, ignore_errors=True)
-                        break
-            except Exception:
-                pass
-            # registra como falha de RIF, mas segue para o genérico
-            # (a lista `falhas` é criada logo abaixo — usa variável temporária)
-            rifs_importados.append({"nu_rif": nu_rif, "id_rif": None, "erro": str(exc)[:300],
-                                    "como_generico": True})
-        except Exception as exc:  # noqa: BLE001 — parser do RIF não pode matar o lote
-            logger.exception("Falha ao importar RIF %s do ZIP %s (job %s)", nu_rif, arquivo, id_job)
-            for nome_solto in grupo.values():
-                if nome_solto not in arquivos:
-                    arquivos.append(nome_solto)
-            rifs_importados.append({"nu_rif": nu_rif, "id_rif": None, "erro": str(exc)[:300],
-                                    "como_generico": True})
-    if cancelado_pre:
-        jobs_utils.progresso(id_job, processados=0, erros=0)
-        finalizar(nu_inquerito)
-        jobs_utils.marcar_cancelado(id_job)
-        try:
-            from psycopg.types.json import Jsonb
-            from funcoes.db_utils import get_connection
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE investigacao.job_tb01_jobs SET tx_resultado = %s WHERE id_job = %s",
-                        (Jsonb({"qt_rifs": len([r for r in rifs_importados if r.get('id_rif')]),
-                                "rifs": rifs_importados, "cancelado_antes_genericos": True}), id_job),
-                    )
-                conn.commit()
-        except Exception:
-            logger.exception("Falha ao gravar resultado parcial do job %s", id_job)
-        return
     jobs_utils.progresso(id_job, total=len(arquivos), processados=0, erros=0,
                          metricas={"fase": "importando", "ignorados": expansao["ignorados"],
                                    "truncado": expansao["truncado"],
-                                   "rifs_detectados": len(rifs_importados)})
+                                   "rifs_detectados": 0})
 
     qt_erro_texto = 0
     qt_reconhecidos = 0

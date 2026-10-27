@@ -3,10 +3,7 @@ import threading
 from io import BytesIO
 from typing import Any
 
-import torch
 from PIL import Image as PILImage
-from torch import nn
-from transformers import CLIPModel, CLIPProcessor
 
 from funcoes import jobs_pesados, jobs_utils, ufdr_zip
 from funcoes.db_utils import get_connection
@@ -20,6 +17,11 @@ _MODEL: dict[str, Any] = {}  # {"model": ..., "processor": ...}
 
 
 def _carregar_modelo():
+    # torch/transformers vivem no NÓ (o central não embute mais os modelos): o import é tardio
+    # para o módulo continuar carregável no central, onde ninguém chama esta função.
+    import torch
+    from transformers import CLIPModel, CLIPProcessor
+
     if "model" in _MODEL:
         return _MODEL["model"], _MODEL["processor"]
     with _MODEL_LOCK:
@@ -74,6 +76,9 @@ def _extrair_imagem_bytes(id_arquivo: int) -> bytes | None:
 
 
 def _classificar_lote(model, processor, imagens_bytes: list[tuple[int, bytes]], termos: list[str]) -> list[dict]:
+    import torch
+    from torch import nn
+
     resultados = []
     for id_arquivo, dados in imagens_bytes:
         try:

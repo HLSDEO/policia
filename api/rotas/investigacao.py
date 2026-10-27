@@ -173,8 +173,6 @@ from funcoes.iped_cache import ler_thumb as _ler_thumb_iped
 from funcoes.iped_utils import (
     apagar_iped,
     detectar_conta_iped,
-    iniciar_importacao_iped,
-    java_disponivel,
     listar_casos_iped_disponiveis,
     listar_extracoes_iped_inquerito,
     obter_id_inquerito_de_iped,
@@ -374,15 +372,15 @@ class PermissaoIn(BaseModel):
 
 @router.get("/api/investigacao/arquivos")
 def arquivos(usuario: dict = Depends(exigir_aprovado), delegacia: str | None = None):
-    """Lista os .ufdr disponíveis na pasta de dados, para o seletor da página. Se a delegacia tem
-    nó ativo, a lista vem da pasta DO NÓ; senão, da pasta local do central."""
+    """Lista os .ufdr da delegacia para o seletor da página — a pasta mora no NÓ. Sem nó ativo a
+    lista não existe: o central não guarda provas nem importa (409 com a causa)."""
     from funcoes import no_utils
     from funcoes.investigacao_utils import delegacia_permitida
     subpasta = delegacia_permitida(delegacia, usuario)
     remotos = no_utils.listagem_remota(subpasta, subpasta, "ufdr")
-    if remotos is not None:
-        return remotos
-    return listar_arquivos_ufdr(subpasta)
+    if remotos is None:
+        raise HTTPException(status_code=409, detail=no_utils.SEM_NO_ATIVO_MSG)
+    return remotos
 
 
 @router.post("/api/investigacao/ufdr-upload")
@@ -2538,11 +2536,15 @@ def extrair_documento(payload: ExtracaoIn, usuario: dict = Depends(exigir_aprova
         if not nome_zip or "/" in nome_zip or "\\" in nome_zip:
             raise HTTPException(status_code=400, detail="Arquivo inválido.")
         from funcoes.documentos_utils import _no_com_arquivo, _subpasta_docs
-        # falha rápido com 404 quando o ZIP não está nem no central nem no nó (sem isso o
+        from funcoes.no_utils import SEM_NO_ATIVO_MSG, servidor_ativo_para
+        # o central não importa: sem nó ativo a fila de ZIP nem nasce
+        if servidor_ativo_para(payload.delegacia or subpasta) is None:
+            raise HTTPException(status_code=409, detail=SEM_NO_ATIVO_MSG)
+        # falha rápido com 404 quando o ZIP não está na pasta do nó (sem isso o
         # erro só apareceria no job, depois do polling começar)
         _caminho_zip = _subpasta_docs(subpasta) / nome_zip
-        if not _caminho_zip.is_file() and _no_com_arquivo(_caminho_zip, payload.delegacia) is None:
-            raise HTTPException(status_code=404, detail="Arquivo não encontrado na pasta de dados.")
+        if _no_com_arquivo(_caminho_zip, payload.delegacia) is None:
+            raise HTTPException(status_code=404, detail="Arquivo não encontrado na pasta do servidor da delegacia.")
         # inquérito criado AGORA (barato e síncrono): escopa o guard do job e o link de
         # acompanhamento — o worker só anexa. Gera o CASO-AAAA.NNNN uma vez, aqui.
         with get_connection() as conn:
@@ -2572,54 +2574,9 @@ def extrair_documento(payload: ExtracaoIn, usuario: dict = Depends(exigir_aprova
                 "no_arquivo": nome_zip,
                 "mensagem": "Importação do ZIP iniciada em background — acompanhe o progresso."}
 
-    # Documento avulso PESADO (PDF de perícia, planilha gigante): a extração de texto sai da
-    # requisição e entra na fila — mesmo motivo do ZIP, o proxy_read_timeout de 300 s. Só vale
-    # para arquivo LOCAL: documento de nó extrai na estação (barato de lado lá, e o central não
-    # sabe o tamanho sem consultar — segue o caminho síncrono de sempre).
-    from funcoes.documentos_utils import _subpasta_docs
-    from funcoes.zip_import import iniciar_importacao_documento, limite_doc_sincrono_bytes
-
-    teto = limite_doc_sincrono_bytes()
-    nome_doc = (payload.arquivo or "").strip()
-    # o mesmo guard do anexar, antes do stat: sem isto um "../x" faria este código bisbilhotar
-    # o tamanho de um arquivo fora de data/ (o anexar recusaria depois, mas o stat já tinha ido)
-    if teto and nome_doc and "/" not in nome_doc and "\\" not in nome_doc:
-        _caminho_doc = _subpasta_docs(subpasta) / nome_doc
-        try:
-            pesado = _caminho_doc.is_file() and _caminho_doc.stat().st_size > teto
-        except OSError:
-            pesado = False
-        if pesado:
-            from funcoes.db_utils import get_connection
-            from funcoes.investigacao_utils import _obter_ou_criar_inquerito
-
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    id_inquerito = _obter_ou_criar_inquerito(cur, numero, usuario["id_usuario"],
-                                                            payload.delegacia,
-                                                            payload.caso_inteligencia)
-                    if payload.caso_inteligencia and not numero:
-                        cur.execute(
-                            "SELECT nu_inquerito FROM investigacao.inq_tb01_inqueritos "
-                            "WHERE id_inquerito = %s",
-                            (id_inquerito,),
-                        )
-                        numero = cur.fetchone()[0]
-                conn.commit()
-            try:
-                id_job = iniciar_importacao_documento(
-                    arquivo=payload.arquivo.strip(), id_inquerito=id_inquerito,
-                    nu_inquerito=numero, subpasta=subpasta, delegacia=payload.delegacia,
-                    id_usuario=usuario["id_usuario"],
-                    no_delegacia_usuario=usuario.get("no_delegacia"),
-                    caso_inteligencia=payload.caso_inteligencia)
-            except jobs_utils.JobOcupado as exc:
-                raise HTTPException(status_code=409, detail=str(exc))
-            return {"ok": True, "job_queued": True, "id_job": id_job,
-                    "id_inquerito": id_inquerito, "nu_inquerito": numero,
-                    "no_arquivo": payload.arquivo.strip(),
-                    "mensagem": "Documento grande: importação em background — acompanhe o progresso."}
-
+    # O documento mora no nó e o texto é extraído na estação (POST /no/parse) — o caminho
+    # síncrono de sempre; não existe mais o "documento local pesado" porque o central não
+    # guarda arquivos.
     try:
         resultado = anexar_documento_inquerito(payload.arquivo, numero, usuario["id_usuario"], subpasta,
                                                delegacia=payload.delegacia,
@@ -3098,15 +3055,15 @@ def apagar_telefonia_rota(id_telefonia: int, usuario: dict = Depends(exigir_apro
 
 @router.get("/api/investigacao/rifs-disponiveis")
 def rifs_disponiveis(usuario: dict = Depends(exigir_aprovado), delegacia: str | None = None):
-    """Lista as subpastas de data/ com 'RIF' no nome, para o seletor. Se a delegacia tem nó
-    ativo, a lista vem da pasta DO NÓ; senão, da pasta local do central."""
+    """Lista as subpastas de RIF da delegacia, para o seletor — a pasta mora no NÓ. Sem nó
+    ativo não há lista: o central não importa (409 com a causa)."""
     from funcoes import no_utils
     from funcoes.investigacao_utils import delegacia_permitida
     subpasta = delegacia_permitida(delegacia, usuario)
     remotos = no_utils.listagem_remota(subpasta, subpasta, "rif")
-    if remotos is not None:
-        return remotos
-    return listar_rifs_disponiveis(subpasta)
+    if remotos is None:
+        raise HTTPException(status_code=409, detail=no_utils.SEM_NO_ATIVO_MSG)
+    return remotos
 
 
 @router.post("/api/investigacao/rif-upload")
@@ -3140,8 +3097,18 @@ def upload_rif(
 
 @router.post("/api/investigacao/extrair-rif")
 def extrair_rif(payload: RifIn, usuario: dict = Depends(exigir_aprovado)):
-    """Importa um RIF (pasta em data/) para um inquérito: parseia os CSVs em tabelas próprias e anexa
-    o PDF como documento. Cria o inquérito se o número ainda não existir."""
+    """Importa um RIF (pasta na estação) para um inquérito: parseia os CSVs em tabelas próprias e
+    anexa o PDF como documento. Cria o inquérito se o número ainda não existir.
+
+    BLOQUEADO no central: o parse do RIF roda no servidor da delegacia (nó) — importação liberada
+    quando o nó da delegacia suportar o processamento."""
+    from funcoes.no_utils import SEM_NO_ATIVO_MSG
+
+    raise HTTPException(
+        status_code=409,
+        detail="A importação de RIF roda no servidor da delegacia (nó) e ainda não está "
+               "disponível nessa versão. O envio da pasta continua funcionando; a importação "
+               "será liberada quando o nó suportar o processamento. " + SEM_NO_ATIVO_MSG)
     from funcoes.investigacao_utils import delegacia_permitida
 
     numero = _validar_numero_ou_caso(payload.numero_inquerito, payload.caso_inteligencia, usuario)
@@ -3304,15 +3271,15 @@ def apagar_rif_rota(id_rif: int, usuario: dict = Depends(exigir_aprovado)):
 
 @router.get("/api/investigacao/simba-disponiveis")
 def simba_disponiveis(usuario: dict = Depends(exigir_aprovado), delegacia: str | None = None):
-    """Lista os *R304*.csv de data/, para o seletor da página. Se a delegacia tem nó ativo,
-    a lista vem da pasta DO NÓ; senão, da pasta local do central."""
+    """Lista os *R304*.csv da delegacia, para o seletor da página — a pasta mora no NÓ. Sem nó
+    ativo não há lista: o central não importa (409 com a causa)."""
     from funcoes import no_utils
     from funcoes.investigacao_utils import delegacia_permitida
     subpasta = delegacia_permitida(delegacia, usuario)
     remotos = no_utils.listagem_remota(subpasta, subpasta, "simba")
-    if remotos is not None:
-        return remotos
-    return listar_arquivos_simba(subpasta)
+    if remotos is None:
+        raise HTTPException(status_code=409, detail=no_utils.SEM_NO_ATIVO_MSG)
+    return remotos
 
 
 @router.post("/api/investigacao/simba-upload")
@@ -3357,7 +3324,17 @@ def upload_simba(
 def extrair_simba(payload: SimbaIn, usuario: dict = Depends(exigir_aprovado)):
     """Importa um extrato bancário do SIMBA (relatório R304) para um inquérito: carrega contas,
     lançamentos e contrapartes consolidadas, e anexa uma síntese textual para a IA. Cria o
-    inquérito se o número ainda não existir."""
+    inquérito se o número ainda não existir.
+
+    BLOQUEADO no central: o parse do R304 roda no servidor da delegacia (nó) — importação
+    liberada quando o nó da delegacia suportar o processamento."""
+    from funcoes.no_utils import SEM_NO_ATIVO_MSG
+
+    raise HTTPException(
+        status_code=409,
+        detail="A importação de SIMBA roda no servidor da delegacia (nó) e ainda não está "
+               "disponível nessa versão. O envio do R304 continua funcionando; a importação "
+               "será liberada quando o nó suportar o processamento. " + SEM_NO_ATIVO_MSG)
     from funcoes.investigacao_utils import delegacia_permitida
 
     numero = _validar_numero_ou_caso(payload.numero_inquerito, payload.caso_inteligencia, usuario)
@@ -3576,8 +3553,12 @@ def apagar_simba_rota(id_extrato: int, usuario: dict = Depends(exigir_aprovado))
 
 @router.get("/api/investigacao/iped-disponivel")
 def iped_disponivel():
-    """True se há um `java` executável na imagem — o front desabilita a aba sem isso."""
-    return {"disponivel": java_disponivel()}
+    """IPED está desativado no central: o dumper Java (IpedDumper) exigia JRE e a pasta do caso
+    no próprio servidor — nenhum dos dois existe na imagem do central. A importação de casos
+    IPED rodará no nó da delegacia (aguardando suporte); o front desabilita a aba com o aviso."""
+    return {"disponivel": False,
+            "motivo": "Importação IPED rodará no nó da delegacia (aguardando suporte no nó) — "
+                      "indisponível no central."}
 
 
 @router.get("/api/investigacao/iped-disponiveis")
@@ -3611,23 +3592,17 @@ def extrair_iped(payload: IpedIn, usuario: dict = Depends(exigir_aprovado)):
     (subprocesso Java, ver api/tools/iped_dumper/IpedDumper.java) e grava cada item em
     ARQ_TB01_ARQUIVOS (mesma tabela do UFDR). Antes de iniciar, identifica a conta
     do caso e renomeia a pasta em data/ para o e-mail (ou usa `payload.conta`, se o
-    investigador já confirmou/editou a sugestão). Cria o inquérito se o número ainda não existir."""
-    from funcoes.investigacao_utils import delegacia_permitida
+    investigador já confirmou/editou a sugestão). Cria o inquérito se o número ainda não existir.
 
-    numero = _validar_numero_ou_caso(payload.numero_inquerito, payload.caso_inteligencia, usuario)
+    BLOQUEADO no central: o dumper do IPED exige a pasta-caso no disco de quem processa — e o
+    central não processa importações. Liberada quando o nó suportar o dumper."""
+    from funcoes.no_utils import SEM_NO_ATIVO_MSG
 
-    subpasta = delegacia_permitida(payload.delegacia, usuario)
-
-    try:
-        resultado = iniciar_importacao_iped(payload.arquivo, numero, usuario["id_usuario"], subpasta,
-                                            conta=payload.conta, delegacia=payload.delegacia,
-                                            in_caso_inteligencia=payload.caso_inteligencia)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Pasta não encontrada em data/.")
-
-    return {"ok": True, **resultado}
+    raise HTTPException(
+        status_code=409,
+        detail="A importação do IPED roda no servidor da delegacia (nó) e ainda não está "
+               "disponível nessa versão — a importação será liberada quando o nó suportar o "
+               "dumper. " + SEM_NO_ATIVO_MSG)
 
 
 @router.get("/api/investigacao/inqueritos/{id_inquerito}/extracoes-iped")

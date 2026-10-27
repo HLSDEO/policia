@@ -389,12 +389,6 @@ def _cache_no(valor: str) -> Path | None:
     uma cópia VOLÁTIL puxada por GET /no/arquivo — escondida em data/.no_cache/, nunca listada,
     nunca organizada, e apagável a qualquer momento (a próxima leitura refaz). None se nenhum nó
     ativo é dono deste arquivo."""
-    if (os.environ.get("PAPEL") or "central").strip().lower() == "no":
-        # este cache é um truque do CENTRAL (materializar aqui o que está lá). No NÓ o resolver
-        # já terminou: o arquivo existe no disco daqui ou não existe — e buscar no banco daqui
-        # sem banco aqui pendura a thread no pool para sempre (visto em produção: POST /no/hash
-        # de arquivo inexistente travava sem nunca responder).
-        return None
     try:
         from funcoes.db_utils import get_connection
         with get_connection() as conn:
