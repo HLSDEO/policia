@@ -1,11 +1,16 @@
 # ===================================================================================================================
 # Analyser no OpenShift (Red Hat) — namespace de destino: pf-policia-dev (ajuste labels/namespace se for outro).
 #
-# Aplica com:  oc apply -f openshift.yaml
+# Aplica com:  oc apply -f openshift.yaml   (ou cole no Developer → Import YAML)
 # ANTES disso:
-#   1) crie as imagens (README "Build das imagens") e faça push no registry interno do cluster;
+#   1) os 4 builds (openshift-builds.yaml) precisam terminar Complete — as imagens são
+#      referidas pelo NOME CURTO (analyser-api:latest etc.): o OpenShift resolve para o
+#      ImageStreamTag do MESMO projeto do pod (mesma regra do console). Não usar o DNS do
+#      registry interno — e se um dia precisar do FQDN, o nome correto do service é
+#      registry.openshift-image-registry.svc:5000/<ns>/<is>:<tag>;
 #   2) crie o Secret com o .env da aplicação (README "Secret analiser-env"). Este arquivo NÃO
-#      carrega segredos no git — o Secret é criado por linha de comando.
+#      carrega segredos no git — o Secret é criado por linha de comando. Sem ele os pods
+#      api/tunel ficam em FailedMount ("secret analyser-env not found").
 #
 # Padrões mantidos do openshift.yaml de teste que já estava funcionando:
 #  - label app: pf-policia-dev em tudo;
@@ -63,7 +68,7 @@ items:
         spec:
           containers:
             - name: postgres
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-postgres:latest
+              image: analyser-postgres:latest
               ports:
                 - {containerPort: 5432, name: postgres}
               env:
@@ -118,7 +123,7 @@ items:
         spec:
           containers:
             - name: pgbouncer
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-pgbouncer:latest
+              image: analyser-pgbouncer:latest
               ports:
                 - {containerPort: 6432, name: pgbounce}
               env:
@@ -195,14 +200,14 @@ items:
           # Efeito colateral: edições feitas na tela de Administração valem até o pod reiniciar.
           initContainers:
             - name: seed-env
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
+              image: analyser-api:latest
               command: ["sh", "-c", "cp /seed/.env /runtime/.env && chmod 660 /runtime/.env"]
               volumeMounts:
                 - {name: seed, mountPath: /seed, readOnly: true}
                 - {name: runtime, mountPath: /runtime}
           containers:
             - name: api
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
+              image: analyser-api:latest
               ports:
                 - {containerPort: 3000, name: http}
               env:
@@ -273,14 +278,14 @@ items:
         spec:
           initContainers:
             - name: seed-env
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
+              image: analyser-api:latest
               command: ["sh", "-c", "cp /seed/.env /runtime/.env && chmod 660 /runtime/.env"]
               volumeMounts:
                 - {name: seed, mountPath: /seed, readOnly: true}
                 - {name: runtime, mountPath: /runtime}
           containers:
             - name: tunel
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
+              image: analyser-api:latest
               command: ["sh", "-c", "exec uvicorn tunel_app:app --host 0.0.0.0 --port 3001 --log-config logging.json"]
               ports:
                 - {containerPort: 3001, name: http}
@@ -336,7 +341,7 @@ items:
         spec:
           containers:
             - name: web
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-web:latest
+              image: analyser-web:latest
               ports:
                 - {containerPort: 8080, name: http}
               readinessProbe:
