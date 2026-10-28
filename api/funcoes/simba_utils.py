@@ -935,6 +935,15 @@ def solicitar_cancelamento_simba(id_extrato: int) -> bool:
                 (id_extrato,),
             )
             achou = cur.fetchone() is not None
+            if achou:
+                # importação REMOTA (nó): quem roda é o worker do nó, e ele só enxerga o
+                # fl_cancelar da PONTE (vem na resposta do callback de estado — BatimentoPonte)
+                cur.execute(
+                    """UPDATE investigacao.inq_tb02_extracoes
+                       SET fl_cancelar = true
+                       WHERE no_fonte = 'simba' AND id_importacao = %s
+                         AND cd_status = 'processando'""",
+                    (id_extrato,))
         conn.commit()
     return achou
 

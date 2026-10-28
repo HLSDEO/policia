@@ -330,6 +330,20 @@ def _fechar_importacao_no(id_extracao: int, no_fonte: str, id_importacao: int,
                 avisos.append(aviso)
         except Exception:
             logger.exception("cauda SIMBA (importação %s) — melhor esforço", id_importacao)
+        # o CSV mora na estação — quem calcula os hashes é o nó (no caminho local é
+        # _processar_importacao); sem eles a tela não mostraria a integridade do extrato
+        hashes = (payload or {}).get("hashes") or {}
+        if hashes.get("md5"):
+            try:
+                with db_utils.get_connection() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE investigacao.smb_tb01_extratos "
+                        "SET co_hash_md5 = %s, co_hash_sha1 = %s, co_hash_sha256 = %s "
+                        "WHERE id_extrato = %s",
+                        (hashes["md5"], hashes.get("sha1"), hashes.get("sha256"), id_importacao))
+                conn.commit()
+            except Exception:
+                logger.exception("hashes do SIMBA remoto %s — melhor esforço", id_importacao)
     elif no_fonte == "rif" and id_importacao:
         try:
             from funcoes.identificacao_pessoas import agendar_identificacao_pos_importacao

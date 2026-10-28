@@ -534,6 +534,15 @@ def solicitar_cancelamento_iped(id_extracao_iped: int) -> bool:
                 (id_extracao_iped,),
             )
             achou = cur.fetchone() is not None
+            if achou:
+                # importação REMOTA (nó): o worker da estação só enxerga o fl_cancelar da
+                # PONTE (BatimentoPonte o lê na resposta do callback de estado)
+                cur.execute(
+                    """UPDATE investigacao.inq_tb02_extracoes
+                       SET fl_cancelar = true
+                       WHERE no_fonte = 'iped' AND id_importacao = %s
+                         AND cd_status = 'processando'""",
+                    (id_extracao_iped,))
         conn.commit()
     return achou
 
