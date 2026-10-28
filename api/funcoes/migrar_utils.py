@@ -130,7 +130,7 @@ def estado() -> dict:
         num = _numero(caminho.name)
         if num not in registradas:
             pendentes.append(caminho.name)
-        elif registradas[num] != _sha256(caminho.read_text(encoding="utf-8")):
+        elif registradas[num] != _sha256(caminho.read_text(encoding="utf-8-sig")):
             alteradas.append(caminho.name)
 
     return {
@@ -201,7 +201,7 @@ def executar(aplicada_por: str = "manual") -> dict:
                 if num in registradas:
                     continue
 
-                sql = caminho.read_text(encoding="utf-8")
+                sql = caminho.read_text(encoding="utf-8-sig")
                 sem_transacao = sql.lstrip().startswith(_MARCA_SEM_TRANSACAO)
                 inicio = time.monotonic()
 
@@ -243,7 +243,7 @@ def executar(aplicada_por: str = "manual") -> dict:
                     with conn.cursor() as cur:
                         cur.execute("SELECT CO_HASH FROM SEGURANCA.SIS_TB01_MIGRACOES WHERE NU_MIGRACAO = %s", (num,))
                         gravado = (cur.fetchone()[0] or "").strip()
-                    if gravado and gravado != _sha256(caminho.read_text(encoding="utf-8")):
+                    if gravado and gravado != _sha256(caminho.read_text(encoding="utf-8-sig")):
                         logger.warning(
                             "migração %s foi editada DEPOIS de aplicada (hash difere) — o correto é um delta novo",
                             caminho.name,
@@ -290,7 +290,7 @@ def marcar_baseline(origem: str = "manual", aplicada_por: str = "cutover") -> di
                 conn.commit()
                 for caminho in arquivos:
                     num = _numero(caminho.name)
-                    sql = caminho.read_text(encoding="utf-8")
+                    sql = caminho.read_text(encoding="utf-8-sig")
                     cur.execute(
                         """INSERT INTO SEGURANCA.SIS_TB01_MIGRACOES
                                (NU_MIGRACAO, NO_ARQUIVO, CO_HASH, DS_ORIGEM, NO_APLICADA_POR)
