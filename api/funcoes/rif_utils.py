@@ -1640,6 +1640,81 @@ def importar_rif(no_pasta: str, numero_inquerito: str, id_usuario: int | None, s
 
 
 # ---------------------------------------------------------------------------
+# Importação REMOTA (nó): replay dos registros do canal (funcoes/no_importacao.py)
+#
+# O nó parseia a pasta na estação e emite rif_* pelo canal de entrega; aqui cada registro
+# vira o MESMO INSERT do importador local, com id_rif/id_inquerito resolvidos pela ponte.
+# ---------------------------------------------------------------------------
+
+def reproduzir_rif(cur, tipo: str, args: tuple, fonte: dict) -> None:
+    """Reproduz um registro rif_* do nó. `fonte` é a ponte (no_importacao): id_importacao é o
+    id_rif criado no despacho, id_inquerito/id_usuario acompanham — nada de chave natural."""
+    id_rif = fonte["id_importacao"]
+    if tipo == "rif_meta":
+        # [nu_rif, no_pasta, qt_com, qt_env, qt_oco, pdf_nome, pdf_texto, pdf_erro]
+        nu_rif, no_pasta, qt_com, qt_env, qt_oco, pdf_nome, pdf_texto, pdf_erro = args
+        id_documento_pdf = None
+        if pdf_nome is not None:
+            # o texto do PDF sai da estação (o arquivo mora lá) e entra na mesma tabela do
+            # importador local — a IA do caso lê daqui
+            cur.execute(
+                """INSERT INTO investigacao.inq_tb04_documentos
+                       (id_inquerito, no_arquivo, tp_arquivo, tx_conteudo, qt_caracteres,
+                        tx_erro, id_usuario)
+                   VALUES (%s, %s, 'pdf', %s, %s, %s, %s) RETURNING id_documento""",
+                (fonte["id_inquerito"], pdf_nome, pdf_texto,
+                 len(pdf_texto) if pdf_texto else None, pdf_erro, fonte["id_usuario"]))
+            id_documento_pdf = cur.fetchone()[0]
+        cur.execute(
+            """UPDATE investigacao.rif_tb01_rifs
+               SET nu_rif = %s, no_pasta = %s, qt_comunicacoes = %s, qt_envolvidos = %s,
+                   qt_ocorrencias = %s, id_documento_pdf = %s
+               WHERE id_rif = %s""",
+            (nu_rif, no_pasta, qt_com, qt_env, qt_oco, id_documento_pdf, id_rif))
+    elif tipo == "rif_arquivos":
+        cur.executemany(
+            """INSERT INTO investigacao.rif_tb06_arquivos
+                   (id_rif, no_arquivo, tp_arquivo, qt_bytes, co_hash_md5, co_hash_sha1,
+                    co_hash_sha256)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            [(id_rif, *linha) for linha in args[0]])
+    elif tipo == "rif_comunicacoes":
+        for r in args[0]:
+            # [nu_indexador, id_comunicacao, nu_ocorrencia_bc, dt_recebimento, dt_operacao,
+            #  dt_fim_fato, nu_cpf_cnpj_comunicante, no_comunicante, no_cidade_agencia,
+            #  sg_uf_agencia, no_agencia, nu_agencia, info, vl_a, vl_b, vl_c, vl_d, vl_e,
+            #  cd_segmento]
+            cur.execute(
+                """INSERT INTO investigacao.rif_tb02_comunicacoes
+                       (id_rif, nu_indexador, id_comunicacao, nu_ocorrencia_bc, dt_recebimento,
+                        dt_operacao, dt_fim_fato, nu_cpf_cnpj_comunicante, no_comunicante,
+                        no_cidade_agencia, sg_uf_agencia, no_agencia, nu_agencia,
+                        tx_informacoes_adicionais, vl_campo_a, vl_campo_b, vl_campo_c, vl_campo_d,
+                        vl_campo_e, cd_segmento)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING id_comunicacao_rif""",
+                (id_rif, *r))
+            # as contrapartes são extraídas AQUI (mesmo regex de sempre do importador local)
+            _gravar_contrapartes(cur, cur.fetchone()[0], id_rif, r[12], r[18], r[14], r[15])
+    elif tipo == "rif_envolvidos":
+        cur.executemany(
+            """INSERT INTO investigacao.rif_tb03_envolvidos
+                   (id_rif, nu_indexador, nu_cpf_cnpj, no_envolvido, tp_envolvido, nu_agencia,
+                    nu_conta, dt_abertura_conta, dt_atualizacao_conta, tx_pep, tx_pessoa_obrigada,
+                    tx_servidor)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            [(id_rif, *linha) for linha in args[0]])
+    elif tipo == "rif_ocorrencias":
+        cur.executemany(
+            """INSERT INTO investigacao.rif_tb04_ocorrencias
+                   (id_rif, nu_indexador, id_ocorrencia, tx_ocorrencia)
+               VALUES (%s, %s, %s, %s)""",
+            [(id_rif, *linha) for linha in args[0]])
+    else:  # defensivo: o dispatcher já filtrou, mas tipo novo sem handler não pode passar mudo
+        raise ValueError(f"registro rif_* desconhecido: {tipo!r}")
+
+
+# ---------------------------------------------------------------------------
 # Consultas (card + página rif.html) e remoção
 # ---------------------------------------------------------------------------
 

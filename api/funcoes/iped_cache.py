@@ -168,11 +168,30 @@ def _resolver_caminho_origem(pasta_modulo: Path, data_source_path: str) -> Path:
     return resolvido
 
 
+def _no_remoto(pasta_modulo):
+    """Caso IPED que mora no nó da delegacia (importação despachada — no_importacao.py):
+    o storage-N.db é local à estação e NUNCA é copiado; o blob chega por GET /no/iped-blob.
+    O marcador IpedRemoto entra no lugar do Path em _resolver_arquivo_iped."""
+    from funcoes import no_ponte
+
+    return pasta_modulo if isinstance(pasta_modulo, no_ponte.IpedRemoto) else None
+
+
 def ler_blob(pasta_modulo: Path, data_source_path: str, hash_md5: str,
              id_in_data_source: str = "") -> bytes:
     """Lê o binário de um item do IPED. `pasta_modulo` é a pasta com index/storage/lib
-    direto dentro (ver iped_utils._pasta_modulo_iped). Levanta FileNotFoundError se o
-    binário não puder ser localizado."""
+    direto dentro (ver iped_utils._pasta_modulo_iped) — OU um no_ponte.IpedRemoto, quando o
+    caso está no nó da delegacia (a leitura vai buscar o blob lá). Levanta FileNotFoundError
+    se o binário não puder ser localizado."""
+    remoto = _no_remoto(pasta_modulo)
+    if remoto is not None:
+        from funcoes import no_ponte
+
+        dados = no_ponte.iped_blob(remoto.no, remoto.pasta, data_source_path, hash_md5,
+                                   id_in_data_source)
+        if dados is None:
+            raise FileNotFoundError("Blob não encontrado no servidor da delegacia.")
+        return dados
     if not data_source_path or not hash_md5:
         raise FileNotFoundError("Item sem ponteiro de binário.")
 
@@ -218,6 +237,21 @@ def abrir_blob_stream(pasta_modulo: Path, data_source_path: str, hash_md5: str,
     ainda vem inteiro do SQLite (limitação do sqlite3), mas o vídeo descomprimido não.
 
     Levanta FileNotFoundError na PRIMEIRA iteração quando o binário não pode ser localizado."""
+    remoto = _no_remoto(pasta_modulo)
+    if remoto is not None:
+        # o caso está no nó: o blob inteiro vem da estação (descomprimido lá) e é reemitido em
+        # pedaços daqui — o streaming existe para não estourar a RAM, não para ler de vez o
+        # storage remoto (a WAN já imporia isso de qualquer forma; o anexo abre, e é o que importa)
+        from funcoes import no_ponte
+
+        dados = no_ponte.iped_blob(remoto.no, remoto.pasta, data_source_path, hash_md5,
+                                   id_in_data_source)
+        if dados is None:
+            raise FileNotFoundError("Blob não encontrado no servidor da delegacia.")
+        for i in range(0, len(dados), pedacos):
+            yield dados[i:i + pedacos]
+        return
+
     if not data_source_path or not hash_md5:
         raise FileNotFoundError("Item sem ponteiro de binário.")
 
@@ -277,6 +311,11 @@ def ler_thumb(pasta_modulo: Path, hash_md5: str | None) -> bytes | None:
     Duas origens: a tabela `thumbs` do storage-N.db (ImageThumbTask) e, quando o item é VÍDEO
     (que não vai para a tabela `thumbs`), o arquivo em `view/H0/H1/HASH.jpg` que o
     VideoThumbTask grava (mesmo layout de Util.getFileFromHash)."""
+    remoto = _no_remoto(pasta_modulo)
+    if remoto is not None:
+        from funcoes import no_ponte
+
+        return no_ponte.iped_thumb(remoto.no, remoto.pasta, hash_md5) if hash_md5 else None
     if not hash_md5:
         return None
     chave_hash = hash_md5.strip().upper()

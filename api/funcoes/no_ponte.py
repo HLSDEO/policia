@@ -129,16 +129,20 @@ def iniciar_extracao_remota(no: dict, id_extracao: int, no_arquivo: str,
 
 
 def iniciar_transcricao_remota(no: dict, id_extracao: int, no_arquivo: str,
-                               modelo: str, incluir_video: bool) -> dict:
+                               modelo: str, incluir_video: bool,
+                               tarefas: list[dict] | None = None) -> dict:
     """DELEGA a transcrição dos áudios de uma extração à estação (POST /no/transcrever): o
     faster-whisper vive no nó, sobre o disco dele. O progresso (fase/progresso/batida), os textos
     ({"t":"transcricao"}) e o fecho ({"t":"transcricao_fim"}) voltam pelos MESMOS callbacks de
-    estado da extração (rotas/no_central.py → canal_extracao.aplicar_estado)."""
+    estado da extração (rotas/no_central.py → canal_extracao.aplicar_estado).
+    tarefas: [{prefixo, caminho_zip}] deduplicada por binário — quem tem o banco é o central,
+    e o nó não consulta nada: recebe a lista pronta e roda o whisper no .ufdr do próprio disco."""
     res = _post(no, "/no/transcrever", {
         "id_extracao": id_extracao,
         "no_arquivo": no_arquivo,
         "modelo": modelo,
         "incluir_video": bool(incluir_video),
+        "tarefas": tarefas or [],
     }, timeout=(_TIMEOUT_CONEXAO, 60))
     if res.status_code == 404:
         detail = ""
@@ -151,6 +155,36 @@ def iniciar_transcricao_remota(no: dict, id_extracao: int, no_arquivo: str,
         raise NoIndisponivel(
             f"O servidor {no['no_servidor']} ainda não suporta transcrição remota "
             "(/no/transcrever) — atualize o nó.")
+    if res.status_code >= 400:
+        _erro_no(res, no)
+    return res.json()
+
+
+def importar_remoto(no: dict, id_extracao: int, tp: str, pasta: str,
+                    opcoes: dict | None = None, geracao: int = 0) -> dict:
+    """DELEGA a importação de RIF/SIMBA/IPED ao nó (POST /no/importar — docs/no_descentralizado.md,
+    "nó importa"): a pasta mora na estação, o parse roda lá e os dados voltam pelo CANAL de
+    entrega (mesmos lotes/estados da extração .ufdr, chaveados pelo id_extracao-ponte criado pelo
+    central em funcoes/no_importacao.py). 404 com detalhe = a pasta não está mais lá; 404 sem =
+    nó velho que ainda não fala /no/importar (mensagem honesta, não erro de rede genérico)."""
+    res = _post(no, "/no/importar", {
+        "tp": tp,
+        "id_extracao": id_extracao,
+        "pasta": pasta,
+        "opcoes": opcoes or {},
+        "geracao": int(geracao or 0),
+    }, timeout=(_TIMEOUT_CONEXAO, 60))
+    if res.status_code == 404:
+        detail = ""
+        try:
+            detail = (res.json() or {}).get("detail", "")
+        except Exception:
+            pass
+        if detail:
+            raise FileNotFoundError(detail)
+        raise NoIndisponivel(
+            f"O servidor {no['no_servidor']} ainda não suporta importação remota "
+            "(/no/importar) — atualize o nó.")
     if res.status_code >= 400:
         _erro_no(res, no)
     return res.json()
@@ -211,6 +245,50 @@ def embed(no: dict, textos: list[str]) -> list[list[float]]:
         raise NoIndisponivel(f"O servidor {no['no_servidor']} devolveu {len(vetores)} vetores "
                              f"para {len(textos)} textos.")
     return vetores
+
+
+# ------------------------------------------------------------------ Nuvem IPED no nó
+
+class IpedRemoto:
+    """Marcador de "o caso IPED mora no nó": viaja no lugar do Path da pasta-módulo nos
+    chamados de iped_cache (ler_blob/abrir_blob_stream/ler_thumb), que o reconhece e pede o
+    conteúdo ao nó em vez de abrir o storage-N.db local. Guarda o nó e o caminho RELATIVO da
+    pasta do caso (IPD_TB01.NO_PASTA fresco, que sobrevive ao rename do fechamento)."""
+
+    __slots__ = ("no", "pasta")
+
+    def __init__(self, no: dict, pasta: str):
+        self.no = no
+        self.pasta = pasta
+
+    def __repr__(self) -> str:
+        return f"<IpedRemoto {self.no.get('no_servidor')} {self.pasta}>"
+
+
+def _no_fonte(no: dict, rota: str, params: dict) -> bytes | None:
+    """GET autenticado que devolve bytes ou None no 404 — é a pergunta "tem esse blob aí?"."""
+    try:
+        res = _get(no, rota, params=params, timeout=(_TIMEOUT_CONEXAO, 300))
+    except NoIndisponivel:
+        raise
+    if res.status_code == 404:
+        return None
+    if res.status_code >= 400:
+        _erro_no(res, no)
+    return res.content
+
+
+def iped_blob(no: dict, pasta: str, origem: str, hash_md5: str, id_ds: str) -> bytes | None:
+    """Conteúdo de um item do caso IPED que está no NÓ (GET /no/iped-blob): o storage-N.db é
+    local à estação e nunca é copiado para o central — o anexo que abre na tela vem daqui,
+    descompactado no nó (o wire é gzip quando ajuda, mas a API deste lado é o bytes puro)."""
+    return _no_fonte(no, "/no/iped-blob",
+                     {"pasta": pasta, "origem": origem, "md5": hash_md5, "id": id_ds})
+
+
+def iped_thumb(no: dict, pasta: str, hash_md5: str) -> bytes | None:
+    """Miniatura do caso IPED no nó (GET /no/iped-thumb) — mesmo storage, chaveada pelo MD5."""
+    return _no_fonte(no, "/no/iped-thumb", {"pasta": pasta, "md5": hash_md5})
 
 
 def arquivo_existe(no: dict, relativo: str) -> bool:

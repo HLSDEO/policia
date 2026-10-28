@@ -1308,6 +1308,35 @@ def _finalizar(id_extracao_iped: int, id_extracao_ponte: int, *, status: str,
         conn.commit()
 
 
+def aplicar_relatorio_importacao_no(id_extracao_iped: int, id_extracao_ponte: int,
+                                    payload: dict) -> None:
+    """Cauda do IPED importado NO NÓ (no_entrega._fechar_importacao_no): o relatório que a
+    estação devolve no 'finalizar' do canal (payload {"ipd": {status, contagens, total_itens,
+    erro, no_pasta, no_conta, versao}}) aplica nas duas pontas com os MESMOS UPDATEs do
+    _finalizar local — o nó rodou o dumper na CPU dele e não tinha banco nenhum.
+
+    Idempotente por natureza (UPDATE por chave); a retomada de fechamento órfão pode chamar
+    de novo com o mesmo payload. A identificação de pessoas roda aqui (e não no nó) porque
+    varre o banco do inquérito inteiro.
+
+    Sem relatório no payload (central morreu entre o 'finalizar' e a cauda, retomando com
+    payload vazio): fecha com o que o banco já mostra — nunca deixa 'processando' para sempre."""
+    rep = payload.get("ipd") or {}
+    status = rep.get("status") or "concluido"
+    _finalizar(id_extracao_iped, id_extracao_ponte, status=status,
+               contagens=rep.get("contagens") or {},
+               total_itens=rep.get("total_itens"),
+               erro=rep.get("erro"),
+               no_pasta=rep.get("no_pasta"),
+               no_conta=rep.get("no_conta"),
+               versao=rep.get("versao"))
+    if status == "concluido":
+        try:
+            _identificar_pessoas_do_caso(id_extracao_ponte)
+        except Exception:
+            logger.exception("identificação de pessoas do caso IPED (nó) — melhor esforço")
+
+
 def _identificar_pessoas_do_caso(id_extracao_ponte: int) -> None:
     """Dispara a identificação de pessoas do inquérito depois que a importação do IPED
     termina (best-effort, no mesmo espírito do UFDR — ver investigacao_utils). A

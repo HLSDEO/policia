@@ -277,10 +277,25 @@ def _resolver_arquivo_iped(caminho_zip: str) -> tuple[Path, str, str, str] | Non
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT no_pasta FROM investigacao.ipd_tb01_extracoes WHERE id_extracao = %s",
+                """SELECT p.no_pasta, e.id_servidor
+                   FROM investigacao.ipd_tb01_extracoes p
+                   LEFT JOIN investigacao.inq_tb02_extracoes e ON e.id_extracao = p.id_extracao
+                   WHERE p.id_extracao = %s""",
                 (id_extracao,))
             row = cur.fetchone()
     if row is None:
+        return None
+    if row[1]:
+        # importação despachada ao nó (no_importacao.py): o caso — e todo storage/lib dele —
+        # está no disco da estação. O marcador IpedRemoto viaja no lugar do Path e o
+        # iped_cache manda a leitura para GET /no/iped-blob. Nó fora do ar = 503 honesto na
+        # abertura do anexo (no_ponte), nunca 404 de "arquivo apagado".
+        from funcoes import no_ponte, no_utils
+
+        no = no_utils.servidor_da_extracao(id_extracao)
+        if no is not None:
+            return (no_ponte.IpedRemoto(no, row[0]), origem, hash_md5, id_fonte)
+        # nó descadastrado: o storage era dele e não veio junto — arquivo perdido de verdade
         return None
     # NO_PASTA vem do banco: revalida e confina a data/ como na criação (ver F7) — sem isto um
     # valor envenenado virava pasta módulo fora de data/ e o blob saía de qualquer lugar.
@@ -3240,6 +3255,16 @@ def iniciar_transcricao_extracao(id_extracao: int, modelo: str = "small") -> dic
     if not pendentes:
         return {"ok": False, "mensagem": "Não há áudios pendentes de transcrição nesta extração."}
 
+    # a lista de trabalho viaja no despacho: o nó não tem banco, então a dedup por binário
+    # (o mesmo áudio em várias conversas é transcrito uma vez) é resolvida aqui
+    vistos: set[str] = set()
+    tarefas: list[dict] = []
+    for prefixo, _id_anexo, caminho_zip in pendentes:
+        if caminho_zip in vistos:
+            continue
+        vistos.add(caminho_zip)
+        tarefas.append({"prefixo": prefixo, "caminho_zip": caminho_zip})
+
     # Transição atômica para 'processando': dois cliques (ou duas abas) não podem disparar duas
     # transcrições sobre o mesmo conjunto — o segundo UPDATE não devolve linha e a rota responde
     # 409. Deixa também o estado visível na hora para o badge e o polling da tela.
@@ -3261,7 +3286,7 @@ def iniciar_transcricao_extracao(id_extracao: int, modelo: str = "small") -> dic
 
     try:
         no_ponte.iniciar_transcricao_remota(no, id_extracao, no_arquivo, modelo,
-                                            bool(incluir_video))
+                                            bool(incluir_video), tarefas=tarefas)
     except Exception as exc:
         # o nó recusou/está fora: devolve a extração ao estado anterior com o aviso — nada
         # atravessou para a estação

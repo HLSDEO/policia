@@ -48,13 +48,14 @@ _FECHANDO_TRAVA = threading.Lock()
 def linha_extracao(id_extracao: int) -> dict | None:
     with db_utils.get_connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT id_extracao, id_servidor, cd_status, fl_cancelar, id_inquerito, "
-                    "nu_geracao "
+                    "nu_geracao, no_fonte, id_importacao "
                     "FROM investigacao.inq_tb02_extracoes WHERE id_extracao = %s", (id_extracao,))
         row = cur.fetchone()
     if row is None:
         return None
     return {"id_extracao": row[0], "id_servidor": row[1], "cd_status": row[2],
-            "fl_cancelar": bool(row[3]), "id_inquerito": row[4], "nu_geracao": row[5]}
+            "fl_cancelar": bool(row[3]), "id_inquerito": row[4], "nu_geracao": row[5],
+            "no_fonte": row[6], "id_importacao": row[7]}
 
 
 class ConflictError(RuntimeError):
@@ -153,7 +154,8 @@ def aplicar_callback(id_extracao: int, payload: dict, id_servidor_dono: int) -> 
                         threading.Thread(target=_fechar_entrega,
                                          args=(id_extracao,
                                                payload.get("audios_transcritos") or 0,
-                                               payload.get("aviso")),
+                                               payload.get("aviso"),
+                                               payload),
                                          daemon=True,
                                          name=f"fechar-entrega-{id_extracao}").start()
                     except Exception:
@@ -284,7 +286,8 @@ def _reivindicar_fechamento(id_extracao: int) -> bool:
         return False
 
 
-def _fechar_entrega(id_extracao: int, audios_transcritos: int, aviso: str | None) -> None:
+def _fechar_entrega(id_extracao: int, audios_transcritos: int, aviso: str | None,
+                    payload: dict | None = None) -> None:
     """Cauda da extração que o nó não pode rodar (exige o banco) — os MESMOS passos que o
     caminho local roda depois do laço, na mesma ordem e com o mesmo best-effort. O FECHAMENTO
     em si não é best-effort: falhou, tenta de novo e, no limite, marca 'erro' com mensagem
@@ -299,18 +302,86 @@ def _fechar_entrega(id_extracao: int, audios_transcritos: int, aviso: str | None
     bat = IU._Batimento(id_extracao)
     bat.iniciar_vigia()
     try:
-        _fechar_entrega_interno(id_extracao, audios_transcritos, aviso)
+        _fechar_entrega_interno(id_extracao, audios_transcritos, aviso, payload)
     finally:
         bat.parar_vigia()
         with _FECHANDO_TRAVA:
             _FECHANDO.discard(id_extracao)
 
 
-def _fechar_entrega_interno(id_extracao: int, audios_transcritos: int, aviso: str | None) -> None:
+def _fechar_importacao_no(id_extracao: int, no_fonte: str, id_importacao: int,
+                          payload: dict | None, avisos: list) -> None:
+    """Cauda das importações que o NÓ processou (RIF/SIMBA/IPED — docs/no_descentralizado.md,
+    "nó importa"). Os dados já foram reproduzidos nos lotes; aqui só o que é específico da
+    fonte e só o banco faz:
+
+    - simba: consolidar contrapartes + síntese p/ IA (SQL sobre o que já entrou);
+    - rif:   identificação de pessoas (envolvidos/contrapartes entram no grafo da Mesa);
+    - iped:  aplica o relatório que o nó devolveu no 'finalizar' (conta detectada, pasta
+             renomeada, versão) na linha-pai e roda a identificação do caso.
+
+    A ponte (INQ_TB02) é o que o card mostra como status, e ela é fechada pelo chamador
+    (_fechar_entrega_interno) logo depois — por isso aqui NÃO se mexe em cd_status dela."""
+    if no_fonte == "simba" and id_importacao:
+        try:
+            from funcoes.simba_utils import fechar_importacao_remota
+            aviso = fechar_importacao_remota(id_importacao)
+            if aviso:
+                avisos.append(aviso)
+        except Exception:
+            logger.exception("cauda SIMBA (importação %s) — melhor esforço", id_importacao)
+    elif no_fonte == "rif" and id_importacao:
+        try:
+            from funcoes.identificacao_pessoas import agendar_identificacao_pos_importacao
+            linha = linha_extracao(id_extracao)
+            if linha and linha["id_inquerito"]:
+                with db_utils.get_connection() as conn, conn.cursor() as cur:
+                    cur.execute("SELECT nu_rif FROM investigacao.rif_tb01_rifs WHERE id_rif = %s",
+                                (id_importacao,))
+                    r = cur.fetchone()
+                agendar_identificacao_pos_importacao(linha["id_inquerito"],
+                                                     f"RIF {(r and r[0]) or id_importacao}")
+        except Exception:
+            logger.exception("identificação de pessoas RIF %s — melhor esforço", id_importacao)
+    elif no_fonte == "iped" and id_importacao:
+        try:
+            from funcoes.iped_utils import aplicar_relatorio_importacao_no
+            aplicar_relatorio_importacao_no(id_importacao, id_extracao, payload or {})
+        except Exception:
+            logger.exception("cauda IPED (importação %s) — melhor esforço", id_importacao)
+
+
+def _fechar_entrega_interno(id_extracao: int, audios_transcritos: int, aviso: str | None,
+                            payload: dict | None = None) -> None:
     from funcoes import investigacao_utils as IU
 
     bat = IU._Batimento(id_extracao)
     avisos = [aviso] if aviso else []
+
+    # importação de fonte (RIF/SIMBA/IPED) despachada ao nó: cauda própria, nada do caminho
+    # .ufdr abaixo (PIX/direção/indexação semântica são do report.xml, que aqui não existe)
+    linha_fonte = linha_extracao(id_extracao)
+    if linha_fonte and linha_fonte.get("no_fonte"):
+        _fechar_importacao_no(id_extracao, linha_fonte["no_fonte"], linha_fonte["id_importacao"],
+                              payload, avisos)
+        ultimo_erro: Exception | None = None
+        for tentativa in range(3):
+            try:
+                IU._finalizar_extracao(id_extracao, audios_transcritos,
+                                       "\n".join(avisos)[:2000] if avisos else None)
+                logger.info("Importação do nó fechada: extração-ponte %s (%s)",
+                            id_extracao, linha_fonte["no_fonte"])
+                return
+            except Exception as exc:
+                ultimo_erro = exc
+                logger.exception("finalize importação (ponte %s) falhou (tentativa %s/3)",
+                                 id_extracao, tentativa + 1)
+                time.sleep(5 * (tentativa + 1))
+        _marcar_erro(id_extracao,
+                     "Todos os dados desta importação foram entregues pelo nó, mas o fechamento "
+                     f"falhou no central: {ultimo_erro}.")
+        return
+
     try:
         IU._corrigir_direcao_dono_extracao(id_extracao)
     except Exception:

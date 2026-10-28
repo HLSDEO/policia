@@ -821,6 +821,106 @@ def _processar_importacao(id_extrato: int, caminho: Path, id_usuario: int | None
         _finalizar(id_extrato, "erro", str(exc))
 
 
+# ---------------------------------------------------------------------------
+# Importação REMOTA (nó): replay dos registros smb_* do canal + fecho da entrega
+#
+# O nó levanta as contas na própria CPU e devolve tudo pelo canal (funcoes/no_importacao.py):
+# smb_meta com os totais, smb_contas com o cadastro, smb_lancamentos em fatias que viram COPY
+# aqui (o COPY do local não pode atravessar a WAN cru). Consolidação de contrapartes e síntese
+# são SQL/leitura do que JÁ foi reproduzido — rodam no fecho (fechar_importacao_remota), sem
+# precisar de registro próprio.
+# ---------------------------------------------------------------------------
+
+def reproduzir_simba(cur, tipo: str, args: tuple, fonte: dict) -> None:
+    """Reproduz um registro smb_* do nó. `fonte` é a ponte: id_importacao = id_extrato criado
+    no despacho."""
+    id_extrato = fonte["id_importacao"]
+    if tipo == "smb_meta":
+        # [qt_contas, qt_titulares, qt_lancamentos, vl_credito, vl_debito, dt_min, dt_max]
+        cur.execute(
+            """UPDATE investigacao.smb_tb01_extratos
+               SET cd_status = 'processando', qt_contas = %s, qt_titulares = %s,
+                   qt_lancamentos = %s, vl_credito = %s, vl_debito = %s,
+                   dt_primeiro_lancamento = %s, dt_ultimo_lancamento = %s
+               WHERE id_extrato = %s""",
+            (*args, id_extrato))
+    elif tipo == "smb_contas":
+        # cada linha: [cd_conta_simba, tx_identificador, no_titular, nu_cpf_cnpj, tp_pessoa,
+        #  nu_banco, no_banco, nu_agencia, nu_conta, tp_conta, dt_abertura, dt_encerramento,
+        #  tx_atendimento, qt, credito, debito, dt_min, dt_max] — o id_conta_simba do COPY é
+        #  resolvido no replay dos lançamentos pela chave natural cd_conta_simba (única por
+        #  extrato), então os lotes não dependem da ordem dos ids
+        cur.executemany(
+            """INSERT INTO investigacao.smb_tb02_contas
+                   (id_extrato, cd_conta_simba, tx_identificador, no_titular, nu_cpf_cnpj,
+                    tp_pessoa, nu_banco, no_banco, nu_agencia, nu_conta, tp_conta,
+                    dt_abertura, dt_encerramento, tx_atendimento, qt_lancamentos,
+                    vl_credito, vl_debito, dt_primeiro_lancamento, dt_ultimo_lancamento)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            [(id_extrato, *linha) for linha in args[0]])
+    elif tipo == "smb_lancamentos":
+        # cada linha: [cd_conta_simba, <as 21 colunas de _COLUNAS_COPY sem id_extrato/id_conta>]
+        cur.execute("SELECT cd_conta_simba, id_conta_simba FROM investigacao.smb_tb02_contas "
+                    "WHERE id_extrato = %s", (id_extrato,))
+        ids = dict(cur.fetchall())
+        sql_copy = ("COPY investigacao.smb_tb03_lancamentos (%s) FROM STDIN"
+                    % ", ".join(_COLUNAS_COPY))
+        with cur.copy(sql_copy) as copia:
+            for linha in args[0]:
+                id_conta = ids.get(linha[0])
+                if id_conta is None:
+                    continue  # conta desconhecida: mesmo descarte do laço local
+                copia.write_row((id_extrato, id_conta, *linha[1:]))
+    else:
+        raise ValueError(f"registro smb_* desconhecido: {tipo!r}")
+
+
+def fechar_importacao_remota(id_extrato: int) -> str | None:
+    """Cauda da importação remota (no_entrega._fechar_entrega_interno): os dois passos que só
+    o banco faz — consolidação das contrapartes e síntese para a IA — e o status final.
+    Idempotente (o retomada de fechamento órfão pode chamar de novo): contrapartes recriadas
+    do zero a partir dos lançamentos, síntese só gerada se ainda não existir."""
+    from funcoes.db_utils import get_connection
+
+    with get_connection(longa=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id_inquerito, no_arquivo, id_usuario, id_documento_sintese "
+                        "FROM investigacao.smb_tb01_extratos WHERE id_extrato = %s",
+                        (id_extrato,))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            id_inquerito, no_arquivo, id_usuario, id_doc_atual = row
+            cur.execute("DELETE FROM investigacao.smb_tb04_contrapartes WHERE id_extrato = %s",
+                        (id_extrato,))
+            qt_contrapartes = _consolidar_contrapartes(cur, id_extrato)
+            cur.execute(
+                "UPDATE investigacao.smb_tb01_extratos SET qt_contrapartes = %s "
+                "WHERE id_extrato = %s", (qt_contrapartes, id_extrato))
+            aviso = None
+            if id_doc_atual is None:
+                try:
+                    texto = _montar_sintese(cur, id_extrato, no_arquivo)
+                    cur.execute(
+                        """INSERT INTO investigacao.inq_tb04_documentos
+                               (id_inquerito, no_arquivo, tp_arquivo, tx_conteudo, qt_caracteres,
+                                id_usuario)
+                           VALUES (%s, %s, 'csv', %s, %s, %s) RETURNING id_documento""",
+                        (id_inquerito, "Síntese do extrato SIMBA — " + no_arquivo, texto,
+                         len(texto), id_usuario))
+                    cur.execute("UPDATE investigacao.smb_tb01_extratos "
+                                "SET id_documento_sintese = %s WHERE id_extrato = %s",
+                                (cur.fetchone()[0], id_extrato))
+                except Exception:
+                    logger.exception("síntese SIMBA %s — a importação fecha sem ela", id_extrato)
+                    aviso = "A síntese para a IA não pôde ser gerada nesta importação."
+            cur.execute("UPDATE investigacao.smb_tb01_extratos SET cd_status = 'concluido', "
+                        "cd_fase = NULL, qt_progresso_fase = NULL "
+                        "WHERE id_extrato = %s AND cd_status <> 'concluido'", (id_extrato,))
+        conn.commit()
+    return aviso
+
+
 def solicitar_cancelamento_simba(id_extrato: int) -> bool:
     """Pede que a thread interrompa a importação. False se o extrato não estiver processando."""
     with get_connection() as conn:

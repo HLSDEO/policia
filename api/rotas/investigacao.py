@@ -3095,34 +3095,37 @@ def upload_rif(
     return resultado
 
 
+def _no_para_importacao(delegacia: str | None) -> dict:
+    """O nó que vai rodar a importação (RIF/SIMBA/IPED — docs/no_descentralizado.md, "nó
+    importa"): sem nó ativo OU nó fora do ar é o mesmo 409 de sempre, com a mensagem que a
+    tela já sabe mostrar. O caminho central puro (importar na própria máquina) não existe
+    mais: o parse é trabalho da CPU da delegacia."""
+    from funcoes import no_utils
+
+    no = no_utils.servidor_ativo_para(delegacia)
+    if no is None or not no.get("online"):
+        raise HTTPException(status_code=409, detail=no_utils.SEM_NO_ATIVO_MSG)
+    return no
+
+
 @router.post("/api/investigacao/extrair-rif")
 def extrair_rif(payload: RifIn, usuario: dict = Depends(exigir_aprovado)):
-    """Importa um RIF (pasta na estação) para um inquérito: parseia os CSVs em tabelas próprias e
-    anexa o PDF como documento. Cria o inquérito se o número ainda não existir.
-
-    BLOQUEADO no central: o parse do RIF roda no servidor da delegacia (nó) — importação liberada
-    quando o nó da delegacia suportar o processamento."""
-    from funcoes.no_utils import SEM_NO_ATIVO_MSG
-
-    raise HTTPException(
-        status_code=409,
-        detail="A importação de RIF roda no servidor da delegacia (nó) e ainda não está "
-               "disponível nessa versão. O envio da pasta continua funcionando; a importação "
-               "será liberada quando o nó suportar o processamento. " + SEM_NO_ATIVO_MSG)
+    """Importa um RIF (pasta na estação) para um inquérito: o parse roda no servidor da
+    delegacia e os dados voltam pelo canal de entrega (funcoes/no_importacao.py). Cria o
+    inquérito e a fila aqui; o andamento aparece no status do RIF."""
     from funcoes.investigacao_utils import delegacia_permitida
+    from funcoes.no_importacao import despachar_rif
 
     numero = _validar_numero_ou_caso(payload.numero_inquerito, payload.caso_inteligencia, usuario)
-
     subpasta = delegacia_permitida(payload.delegacia, usuario)
+    no = _no_para_importacao(payload.delegacia)
 
     try:
-        resultado = importar_rif(payload.pasta, numero, usuario["id_usuario"], subpasta,
-                                 delegacia=payload.delegacia,
-                                 in_caso_inteligencia=payload.caso_inteligencia)
+        resultado = despachar_rif(no, payload.pasta, numero, usuario["id_usuario"], subpasta,
+                                  delegacia=payload.delegacia,
+                                  in_caso_inteligencia=payload.caso_inteligencia)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Pasta do RIF não encontrada em data/.")
+        raise HTTPException(status_code=409, detail=str(exc))
 
     return {"ok": True, **resultado}
 
@@ -3322,33 +3325,23 @@ def upload_simba(
 
 @router.post("/api/investigacao/extrair-simba")
 def extrair_simba(payload: SimbaIn, usuario: dict = Depends(exigir_aprovado)):
-    """Importa um extrato bancário do SIMBA (relatório R304) para um inquérito: carrega contas,
-    lançamentos e contrapartes consolidadas, e anexa uma síntese textual para a IA. Cria o
-    inquérito se o número ainda não existir.
-
-    BLOQUEADO no central: o parse do R304 roda no servidor da delegacia (nó) — importação
-    liberada quando o nó da delegacia suportar o processamento."""
-    from funcoes.no_utils import SEM_NO_ATIVO_MSG
-
-    raise HTTPException(
-        status_code=409,
-        detail="A importação de SIMBA roda no servidor da delegacia (nó) e ainda não está "
-               "disponível nessa versão. O envio do R304 continua funcionando; a importação "
-               "será liberada quando o nó suportar o processamento. " + SEM_NO_ATIVO_MSG)
+    """Importa um extrato bancário do SIMBA (relatório R304 NA ESTAÇÃO) para um inquérito: o
+    parse e a carga de lançamentos rodam no servidor da delegacia e voltam pelo canal de
+    entrega (funcoes/no_importacao.py); consolidação e síntese fecham no central. Cria o
+    inquérito e a fila aqui; o andamento aparece no status do extrato."""
     from funcoes.investigacao_utils import delegacia_permitida
+    from funcoes.no_importacao import despachar_simba
 
     numero = _validar_numero_ou_caso(payload.numero_inquerito, payload.caso_inteligencia, usuario)
-
     subpasta = delegacia_permitida(payload.delegacia, usuario)
+    no = _no_para_importacao(payload.delegacia)
 
     try:
-        resultado = iniciar_importacao_simba(payload.arquivo, numero, usuario["id_usuario"], subpasta,
-                                             delegacia=payload.delegacia,
-                                             in_caso_inteligencia=payload.caso_inteligencia)
+        resultado = despachar_simba(no, payload.arquivo, numero, usuario["id_usuario"], subpasta,
+                                    delegacia=payload.delegacia,
+                                    in_caso_inteligencia=payload.caso_inteligencia)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Arquivo não encontrado em data/.")
+        raise HTTPException(status_code=409, detail=str(exc))
 
     return {"ok": True, **resultado}
 
@@ -3588,21 +3581,26 @@ def iped_detectar_conta(payload: IpedDetectarContaIn, usuario: dict = Depends(ex
 
 @router.post("/api/investigacao/extrair-iped")
 def extrair_iped(payload: IpedIn, usuario: dict = Depends(exigir_aprovado)):
-    """Importa uma pasta-caso do IPED para um inquérito: lê o índice Lucene em background
-    (subprocesso Java, ver api/tools/iped_dumper/IpedDumper.java) e grava cada item em
-    ARQ_TB01_ARQUIVOS (mesma tabela do UFDR). Antes de iniciar, identifica a conta
-    do caso e renomeia a pasta em data/ para o e-mail (ou usa `payload.conta`, se o
-    investigador já confirmou/editou a sugestão). Cria o inquérito se o número ainda não existir.
+    """Importa uma pasta-caso do IPED na estação para um inquérito: o dumper Java roda no
+    servidor da delegacia (é leitura do índice Lucene + storage local, nunca atravessaria a
+    WAN) e os itens voltam pelo canal de entrega como os de um .ufdr (funcoes/no_importacao.py).
+    Os binários ficam na estação e abrem pela ponte GET /no/iped-blob. A conta detectada e o
+    renome da pasta chegam no relatório de fechamento do nó."""
+    from funcoes.investigacao_utils import delegacia_permitida
+    from funcoes.no_importacao import despachar_iped
 
-    BLOQUEADO no central: o dumper do IPED exige a pasta-caso no disco de quem processa — e o
-    central não processa importações. Liberada quando o nó suportar o dumper."""
-    from funcoes.no_utils import SEM_NO_ATIVO_MSG
+    numero = _validar_numero_ou_caso(payload.numero_inquerito, payload.caso_inteligencia, usuario)
+    subpasta = delegacia_permitida(payload.delegacia, usuario)
+    no = _no_para_importacao(payload.delegacia)
 
-    raise HTTPException(
-        status_code=409,
-        detail="A importação do IPED roda no servidor da delegacia (nó) e ainda não está "
-               "disponível nessa versão — a importação será liberada quando o nó suportar o "
-               "dumper. " + SEM_NO_ATIVO_MSG)
+    try:
+        resultado = despachar_iped(no, payload.arquivo, numero, usuario["id_usuario"], subpasta,
+                                   conta=payload.conta, delegacia=payload.delegacia,
+                                   in_caso_inteligencia=payload.caso_inteligencia)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    return {"ok": True, **resultado}
 
 
 @router.get("/api/investigacao/inqueritos/{id_inquerito}/extracoes-iped")

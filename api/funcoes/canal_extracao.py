@@ -106,6 +106,7 @@ def reproduzir_lote(cur, linhas_texto: str, id_extracao: int) -> int:
     da pipeline. Cada registro carrega só dados naturais + o id_extracao global."""
     IU = _fu()
     gravados = 0
+    fonte_ctx, fonte_lido = None, False  # linha-pai das importações remotas (lazy, 1×/lote)
     # splitlines() é guloso: também corta em \x85 (NEL), \u2028 e \u2029 — que o json.dumps
     # (ensure_ascii=False, no emissor) deixa CRUS dentro das strings. Um só U+2028 numa
     # mensagem fendia um registro ao meio e o central rejeitava o lote inteiro
@@ -194,10 +195,49 @@ def reproduzir_lote(cur, linhas_texto: str, id_extracao: int) -> int:
             pass
         elif tipo == "transcricao":
             IU._aplicar_transcricao(cur, *args)
+        elif tipo == "agregado_conta":
+            from funcoes.contas_nuvem_utils import _gravar_agregado_conta
+            _gravar_agregado_conta(cur, *args)
+        elif tipo == "conexao_conta":
+            from funcoes.contas_nuvem_utils import _gravar_conexao_conta
+            _gravar_conexao_conta(cur, *args)
+        elif tipo in _TIPOS_FONTE:
+            # importação remota de RIF/SIMBA (no_importacao.py): a linha-pai é a da ponte
+            # (no_fonte + id_importacao em INQ_TB02_EXTRACOES) — os registros carregam só
+            # dados naturais, o replay usa as MESMAS funções do importador local
+            if not fonte_lido:
+                fonte_ctx, fonte_lido = _fonte_ctx(cur, id_extracao), True
+            fonte = fonte_ctx
+            if fonte is None:
+                raise ValueError(f"ponte de importação ausente para o registro {tipo!r}")
+            if tipo.startswith("rif_"):
+                from funcoes.rif_utils import reproduzir_rif
+                reproduzir_rif(cur, tipo, args, fonte)
+            else:
+                from funcoes.simba_utils import reproduzir_simba
+                reproduzir_simba(cur, tipo, args, fonte)
         else:
             raise ValueError(f"registro de canal desconhecido: {tipo!r}")
         gravados += 1
     return gravados
+
+
+# tipos das importações despachadas ao nó (funcoes/no_importacao.py) — a linha-pai não vem no
+# registro: é a ponte (no_fonte/id_importacao da INQ_TB02_EXTRACOES do lote)
+_TIPOS_FONTE = ("rif_meta", "rif_arquivos", "rif_comunicacoes", "rif_envolvidos",
+                "rif_ocorrencias", "smb_meta", "smb_contas", "smb_lancamentos")
+
+
+def _fonte_ctx(cur, id_extracao: int) -> dict | None:
+    """{no_fonte, id_importacao, id_inquerito, id_usuario} da ponte — lido UMA vez por lote
+    (o laço chama com o mesmo cur). None quando a extração não é uma importação despachada."""
+    cur.execute("SELECT no_fonte, id_importacao, id_inquerito, id_usuario "
+                "FROM investigacao.inq_tb02_extracoes WHERE id_extracao = %s", (id_extracao,))
+    row = cur.fetchone()
+    if row is None or not row[0]:
+        return None
+    return {"no_fonte": row[0], "id_importacao": row[1], "id_inquerito": row[2],
+            "id_usuario": row[3]}
 
 
 # ----------------------------------------------------------------------------- estado (central)
@@ -226,6 +266,21 @@ def aplicar_estado(id_extracao: int, payload: dict) -> dict:
             cur.execute(f"UPDATE investigacao.inq_tb02_extracoes SET {', '.join(f'{c} = {v}' for c, v in campos.items())} "
                         f"WHERE id_extracao = %s AND cd_status = 'processando'",
                         (*params, id_extracao))
+            # importação despachada (RIF/SIMBA/IPED): as telas dessas fontes leem a fase na
+            # LINHA-PAI (smb_tb01 / ipd_tb01), não na ponte — espelha o mesmo payload lá
+            cur.execute("SELECT no_fonte, id_importacao FROM investigacao.inq_tb02_extracoes "
+                        "WHERE id_extracao = %s", (id_extracao,))
+            ponte = cur.fetchone()
+            if ponte and ponte[0] in ("simba", "iped") and ponte[1]:
+                tabela, chave = (("smb_tb01_extratos", "id_extrato") if ponte[0] == "simba"
+                                 else ("ipd_tb01_extracoes", "id_extracao_iped"))
+                # as tabelas próprias não têm dt_ultima_atividade — espelha só fase/progresso
+                colunas = {c: v for c, v in campos.items() if c != "dt_ultima_atividade"}
+                if colunas:
+                    cur.execute(
+                        f"UPDATE investigacao.{tabela} SET "
+                        f"{', '.join(f'{c} = {v}' for c, v in colunas.items())} WHERE {chave} = %s",
+                        (*params, ponte[1]))
         elif t == "hashes":
             cur.execute("UPDATE investigacao.inq_tb02_extracoes SET co_hash_md5 = %s, co_hash_sha1 = %s, "
                         "co_hash_sha256 = %s, dt_ultima_atividade = now() "
