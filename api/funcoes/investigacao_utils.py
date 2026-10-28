@@ -1790,20 +1790,6 @@ def _organizar_arquivo_extracao(id_extracao: int, caminho: Path) -> None:
     Só mexe em extração concluída: .ufdr que deu erro ou foi cancelado fica na pasta de entrega
     da delegacia, para o investigador conferir e reimportar. Best-effort: nada aqui derruba uma
     extração que já terminou."""
-    canal = canal_extracao.emissor_ativo()
-    if canal is not None:
-        # nó (modo entrega): a pasta data/ é a daqui — move na estação e informa o novo relativo
-        # pelo callback; o central grava em NO_ARQUIVO (é lá que a leitura de anexos procura).
-        if canal.cancelar or not getattr(canal, "numero_inquerito", None):
-            return  # cancelada: fica na pasta de entrega para conferir, como no central
-        try:
-            ufdr_cache.fechar_zip(caminho)
-            relativo = organizar(caminho, canal.numero_inquerito, CATEGORIA_CELULAR)
-            if relativo:
-                canal.estado({"t": "arquivo_organizado", "no_arquivo": relativo})
-        except Exception:
-            logger.exception("Falha ao organizar %s na pasta do nó (best-effort)", caminho.name)
-        return
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -1932,11 +1918,6 @@ def _corrigir_direcao_dono_extracao(id_extracao: int) -> int:
 
 
 def _finalizar_extracao(id_extracao: int, audios_transcritos: int, aviso: str | None = None) -> None:
-    _canal = canal_extracao.emissor_ativo()
-    if _canal is not None:
-        _canal.finalizar({"t": "finalizar", "audios_transcritos": audios_transcritos,
-                            "aviso": aviso})  # fecha lotes, entrega tudo e avisa o central
-        return
     """Fecha a extração: 'cancelado' se o usuário pediu para parar, 'concluido' se não.
     aviso: o que ficou por fazer sem ser falha (modelo de transcrição/embeddings não baixado) —
     vai para TX_AVISO e o card mostra um badge de atenção.
@@ -2249,19 +2230,13 @@ def _registrar_tipos_desconhecidos(id_extracao: int, tipos: dict) -> None:
 
 
 @contextlib.contextmanager
-def _conn_da_pipeline(canal):
-    """A conexão longa do laço — ou, no modo entrega, a falsificação que roteia commits
-    para o canal (nenhum acesso ao banco acontece: os escritores estão guardados e o
-    cursor falso grita se alguém esquecer um guard)."""
-    if canal is not None:
-        yield canal_extracao.ConnFalsa(canal), None
-        return
+def _conn_da_pipeline():
+    """A conexão longa do laço (a única da extração)."""
     with get_connection(longa=True) as conn, conn.cursor() as cur:
         yield conn, cur
 
 
-def _processar_extracao(id_extracao: int, caminho: Path, servidor: dict | None = None,
-                        canal=None) -> None:
+def _processar_extracao(id_extracao: int, caminho: Path, servidor: dict | None = None) -> None:
     """Roda em background: lê o .ufdr inteiro, grava tudo no banco e atualiza o status/contagens ao final.
 
     servidor (docs/no_descentralizado.md): quando não-nulo, o .ufdr mora na pasta data() de um nó
@@ -2269,14 +2244,7 @@ def _processar_extracao(id_extracao: int, caminho: Path, servidor: dict | None =
     (calculado no nó, é a leitura inteira do arquivo), a abertura do ZIP (por faixas via HTTP) e o
     fim-de-fluxo (nada de mover o arquivo nem transcrever no central; o parse/indexação rodam
     aqui do mesmo jeito porque tudo que lê o pacote recebe o handle `zf`, não o caminho). Com
-    servidor=None o comportamento é IDÊNTICO ao de sempre.
-
-    canal (funcoes/canal_extracao.py): MODO ENTREGA — é assim que um NÓ processa para o central.
-    O arquivo (`caminho`) é local ao processo, mas nada toca o banco: cada escrita de domínio
-    vira um registro JSON entregue ao central (que reproduz com as mesmas funções), e cada
-    estado (fase/progresso/contagens/finalizar) vira um callback. O emissor é ativado só
-    dentro desta thread — o resto do processo segue normal."""
-    _token_emissor = canal_extracao.ativar(canal) if canal is not None else None
+    servidor=None o comportamento é IDÊNTICO ao de sempre."""
     contagens = {
         "conversas": 0, "mensagens": 0,
         "sms_conversas": 0, "sms_mensagens": 0,
@@ -2294,7 +2262,7 @@ def _processar_extracao(id_extracao: int, caminho: Path, servidor: dict | None =
         **{chave: 0 for chave in _CONTADOR_DOMINIO.values()},
     }
     avisos: list[str] = []  # etapas puladas sem derrubar a extração (vão para TX_AVISO)
-    bat = canal_extracao.BatimentoPonte(canal) if canal is not None else _Batimento(id_extracao)
+    bat = _Batimento(id_extracao)
     cancelado = False
     fonte_leitura = caminho  # Path local, ou a FonteRemota do nó no caminho remoto abaixo
     if servidor is not None:
@@ -2415,8 +2383,7 @@ def _processar_extracao(id_extracao: int, caminho: Path, servidor: dict | None =
             bat.fase("extraindo")
 
             # A ÚNICA conexão longa da extração, e só enquanto o laço está gravando.
-            # No modo entrega (canal), a "conexão" é o próprio canal: commit fecha lote.
-            with _conn_da_pipeline(canal) as (conn, cur):
+            with _conn_da_pipeline() as (conn, cur):
                 cancelado = _laco_report_xml(
                     cur, conn, bat, id_extracao, zf,
                     indice_binarios, caminhos_zip, mapa_fotos, contagem_tamanhos,
@@ -2566,12 +2533,6 @@ def _processar_extracao(id_extracao: int, caminho: Path, servidor: dict | None =
             mensagem = str(exc)
             logger.exception("Extração %s falhou: %s", id_extracao, mensagem)
         try:
-            if canal is not None:
-                # nó: sem banco para gravar o erro — o central recebe por callback e a
-                # entrega em andamento continua útil (lotes já confirmados não se perdem)
-                canal.estado({"t": "erro", "mensagem": mensagem})
-                canal.enviar_pendentes()
-                return
             with get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -2589,8 +2550,6 @@ def _processar_extracao(id_extracao: int, caminho: Path, servidor: dict | None =
         # a thread de batimento não pode sobreviver ao job: uma extração já encerrada continuaria
         # se dizendo viva, e o vigia perderia o único sinal que tem
         bat.parar_vigia()
-        if _token_emissor is not None:
-            canal_extracao.desativar(_token_emissor)
 
 
 # ChatType do UFDR -> o tipo que a tela usa. O valor do arquivo é mais confiável que contar
@@ -3033,10 +2992,6 @@ def _chat_sinteticas(mensagens: list[dict]) -> dict:
 
 
 def _obter_config_transcricao(id_extracao: int) -> tuple[str | None, bool]:
-    _canal = canal_extracao.emissor_ativo()
-    if _canal is not None:
-        # nó: a config veio no corpo do POST /no/extrair (não há banco aqui)
-        return _canal.config_transcricao or (None, False)
     """Lê o modelo de transcrição escolhido para esta extração (pode vir do .env se não foi
     definido por extração) e se os vídeos também devem ser transcritos."""
     with get_connection() as conn:
@@ -3114,10 +3069,6 @@ def _transcrever_audios_pendentes(id_extracao: int, caminho, bat: "_Batimento",
     # "nenhuma" (qualidade escolhida na tela): transcrição desabilitada — nem entra no pool
     if modelo and modelo.strip().lower() == "nenhuma":
         return 0
-    canal = canal_extracao.emissor_ativo()
-    if canal is not None:
-        return _transcrever_audios_pendentes_no(canal, id_extracao, caminho, bat,
-                                                modelo, incluir_video)
     pendentes = _listar_anexos_audio_pendentes(id_extracao, incluir_video)
     if not pendentes:
         return 0
@@ -3155,35 +3106,6 @@ def _transcrever_audios_pendentes(id_extracao: int, caminho, bat: "_Batimento",
                 )
         conn.commit()
 
-    return len(resultado)
-
-
-def _transcrever_audios_pendentes_no(canal, id_extracao: int, caminho, bat,
-                                     modelo: str | None, incluir_video: bool) -> int:
-    """Fase 3 do nó-extrai: o áudio JÁ está no disco do nó, então o whisper roda AQUI (na
-    CPU da estação) e só o TEXTO volta ao central, como registro do canal. A lista de
-    pendentes vem do próprio canal (os anexos que ele acabou de emitir) — no nó não há
-    SELECT de anexos; e o central aplica o texto por co_caminho_zip (chave natural)."""
-    pendentes = [p for p in canal.audios_pendentes
-                 if p["tipo"].startswith("audio")
-                 or (incluir_video and p["tipo"].startswith("video"))]
-    vistos: set[str] = set()
-    tarefas = []
-    for p in pendentes:
-        if p["caminho_zip"] in vistos:
-            continue  # o mesmo binário pode aparecer em mais de um anexo: transcreve uma vez
-        vistos.add(p["caminho_zip"])
-        tarefas.append((f'{p["prefixo"]}|{p["caminho_zip"]}', p["caminho_zip"]))
-    if not tarefas:
-        return 0
-    resultado = transcrever_lote(
-        caminho, tarefas, modelo,
-        deve_cancelar=bat.cancelar_pedido,
-        ao_progredir=bat.progresso,
-    )
-    for chave, texto in resultado.items():
-        prefixo, caminho_zip = chave.split("|", 1)
-        canal.emitir("transcricao", (prefixo, id_extracao, caminho_zip, texto))
     return len(resultado)
 
 
