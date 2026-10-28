@@ -25,13 +25,13 @@ items:
     kind: ImageStream
     metadata:
       name: analyser-api
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec: {}
   - apiVersion: build.openshift.io/v1
     kind: BuildConfig
     metadata:
       name: analyser-api
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       runPolicy: Serial
       completionDeadlineSeconds: 5400        # 1,5 h de teto para o build
@@ -65,13 +65,13 @@ items:
     kind: ImageStream
     metadata:
       name: analyser-web
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec: {}
   - apiVersion: build.openshift.io/v1
     kind: BuildConfig
     metadata:
       name: analyser-web
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       runPolicy: Serial
       completionDeadlineSeconds: 1800
@@ -106,13 +106,13 @@ items:
     kind: ImageStream
     metadata:
       name: analyser-postgres
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec: {}
   - apiVersion: build.openshift.io/v1
     kind: BuildConfig
     metadata:
       name: analyser-postgres
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       runPolicy: Serial
       completionDeadlineSeconds: 1800
@@ -147,13 +147,13 @@ items:
     kind: ImageStream
     metadata:
       name: analyser-pgbouncer
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec: {}
   - apiVersion: build.openshift.io/v1
     kind: BuildConfig
     metadata:
       name: analyser-pgbouncer
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       runPolicy: Serial
       completionDeadlineSeconds: 1200
