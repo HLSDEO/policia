@@ -4694,8 +4694,12 @@ def listar_extracoes(usuario: dict, id_inquerito: int | None = None) -> list[dic
         FROM investigacao.inq_tb02_extracoes e
         JOIN investigacao.inq_tb01_inqueritos i ON i.id_inquerito = e.id_inquerito
         LEFT JOIN seguranca.usr_tb01_usuarios u ON u.id_usuario = e.id_usuario
-        WHERE true{filtro}
-        ORDER BY e.dt_upload DESC
+         WHERE true{filtro}
+           -- linhas-ponte de RIF/SIMBA (NO_FONTE): são o "claim" do canal de entrega, não
+           -- aparelhos — sem isto viram cards "Aparelho não identificado" na tela. A ponte do
+           -- IPED fica (é o card de nuvem IPED, ver comentário do tem_wa_parcial acima).
+           AND coalesce(e.no_fonte, '') NOT IN ('rif', 'simba')
+         ORDER BY e.dt_upload DESC
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -4748,7 +4752,8 @@ def listar_inqueritos(usuario: dict, id_inquerito: int | None = None) -> list[di
                -- os gates de "Comparar celulares"/"Nuvem × aparelho" com conta de nuvem. Caso
                -- do IPED entra quando a fonte é de fato um celular (mesma regra do tp_fonte do
                -- card: conversa/senha/rede/autofill decodificados).
-               count(e.id_extracao) FILTER (WHERE e.no_fabricante IS DISTINCT FROM 'IPED')
+                count(e.id_extracao) FILTER (WHERE e.no_fabricante IS DISTINCT FROM 'IPED'
+                                              AND coalesce(e.no_fonte, '') NOT IN ('rif', 'simba'))
                + (SELECT count(*) FROM investigacao.ipd_tb01_extracoes p
                   WHERE p.id_inquerito = i.id_inquerito AND p.cd_status = 'concluido'
                     AND (coalesce(p.qt_conversas, 0) > 0 OR coalesce(p.qt_senhas, 0) > 0
@@ -4768,8 +4773,26 @@ def listar_inqueritos(usuario: dict, id_inquerito: int | None = None) -> list[di
                coalesce(sum(e.qt_arquivos), 0) AS qt_arquivos,
                coalesce(sum(e.qt_msg_conversas), 0) AS qt_msg_conversas,
                coalesce(sum(e.qt_msg_mensagens), 0) AS qt_msg_mensagens,
-               (SELECT count(*) FROM investigacao.inq_tb04_documentos d
-                 WHERE d.id_inquerito = i.id_inquerito) AS qt_documentos,
+                -- "Outros documentos": só os que NÃO têm bloco próprio no card (PDF do RIF,
+                -- síntese do SIMBA, IPL, IRPF, IPEI, telefonia) — mesma regra da lista
+                -- (listar_documentos_inquerito: in_rif/in_simba/... somem da lista), senão o
+                -- badge conta 1 e a aba abre vazia.
+                (SELECT count(*) FROM investigacao.inq_tb04_documentos d
+                  WHERE d.id_inquerito = i.id_inquerito
+                    AND NOT EXISTS (SELECT 1 FROM investigacao.rif_tb01_rifs r
+                                     WHERE r.id_documento_pdf = d.id_documento)
+                    AND NOT EXISTS (SELECT 1 FROM investigacao.ipl_tb01_inqueritos_pdf p
+                                     WHERE p.id_documento = d.id_documento)
+                    AND NOT EXISTS (SELECT 1 FROM investigacao.smb_tb01_extratos s
+                                     WHERE s.id_documento_sintese = d.id_documento)
+                    AND NOT EXISTS (SELECT 1 FROM investigacao.irp_tb01_declaracoes x
+                                     WHERE x.id_documento = d.id_documento)
+                    AND NOT EXISTS (SELECT 1 FROM investigacao.ipe_tb01_ipeis f
+                                     WHERE f.id_documento = d.id_documento
+                                        OR f.id_documento_anexo = d.id_documento)
+                    AND NOT EXISTS (SELECT 1 FROM investigacao.tel_tb02_arquivos tel
+                                     WHERE tel.id_documento = d.id_documento)
+                ) AS qt_documentos,
                (SELECT count(*) FROM investigacao.rif_tb01_rifs r
                  WHERE r.id_inquerito = i.id_inquerito) AS qt_rifs,
                (SELECT count(*) FROM investigacao.ipl_tb01_inqueritos_pdf p
@@ -8535,10 +8558,11 @@ def listar_extracoes_do_inquerito(id_inquerito: int) -> list[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT id_extracao, no_arquivo, no_dispositivo, no_fabricante, cd_status, no_apelido
-                   FROM investigacao.inq_tb02_extracoes
-                   WHERE id_inquerito = %s
-                   ORDER BY id_extracao DESC""",
+                 """SELECT id_extracao, no_arquivo, no_dispositivo, no_fabricante, cd_status, no_apelido
+                    FROM investigacao.inq_tb02_extracoes
+                    WHERE id_inquerito = %s
+                      AND coalesce(no_fonte, '') NOT IN ('rif', 'simba')
+                    ORDER BY id_extracao DESC""",
                 (id_inquerito,),
             )
             colunas = [d.name for d in cur.description]
