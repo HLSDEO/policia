@@ -306,15 +306,16 @@ items:
                 limits: {memory: 2Gi}
               volumeMounts:
                 - {name: runtime, mountPath: /app/runtime}
-                - {name: logs, mountPath: /app/logs}
+                # SEM o PVC de logs aqui: analyser-logs é ReadWriteOnce e dividir o mesmo PVC RWO
+                # entre os Deployments `api` e `tunel` trava o agendamento (Multi-Attach) sempre
+                # que o scheduler coloca os dois em nós diferentes. O relay loga no stdout
+                # (`oc logs deploy/tunel`); o writer de /app/logs cai no diretório da imagem.
           volumes:
             - name: seed
               secret:
                 secretName: analyser-env
             - name: runtime
               emptyDir: {}
-            - name: logs
-              persistentVolumeClaim: {claimName: analyser-logs}
 
   # ---------------------------------------------------------------------------------------------------------------
   # Web (nginx-unprivileged :8080 + estáticos embutidos + proxy /api/ e /tunel/) e a Route
