@@ -5,9 +5,9 @@
 # ANTES disso:
 #   1) os 4 builds (openshift-builds.yaml) precisam terminar Complete. As imagens são
 #      referidas pelo caminho interno do registry do cluster:
-#        image-registry.openshift-image-registry.svc:5000/pf-policia/<is>:<tag>
+#        image-registry.openshift-image-registry.svc:5000/pf-policia-dev/<is>:<tag>
 #      (mesmo formato que o console OpenShift 4 gera; o admission anexa o pull secret do
-#      service account automaticamente). ATENÇÃO: o segmento /pf-policia/ é o NOME REAL do
+#      service account automaticamente). ATENÇÃO: o segmento /pf-policia-dev/ é o NOME REAL do
 #      projeto — e nome curto sem registry (analyser-api:latest) NÃO funciona no OpenShift 4:
 #      o kubelet interpreta como docker.io e o pull é negado;
 #   2) crie o Secret com o .env da aplicação (README "Secret analiser-env"). Este arquivo NÃO
@@ -70,7 +70,7 @@ items:
         spec:
           containers:
             - name: postgres
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia/analyser-postgres:latest
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-postgres:latest
               ports:
                 - {containerPort: 5432, name: postgres}
               env:
@@ -125,7 +125,7 @@ items:
         spec:
           containers:
             - name: pgbouncer
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia/analyser-pgbouncer:latest
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-pgbouncer:latest
               ports:
                 - {containerPort: 6432, name: pgbounce}
               env:
@@ -202,14 +202,14 @@ items:
           # Efeito colateral: edições feitas na tela de Administração valem até o pod reiniciar.
           initContainers:
             - name: seed-env
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia/analyser-api:latest
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
               command: ["sh", "-c", "cp /seed/.env /runtime/.env && chmod 660 /runtime/.env"]
               volumeMounts:
                 - {name: seed, mountPath: /seed, readOnly: true}
                 - {name: runtime, mountPath: /runtime}
           containers:
             - name: api
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia/analyser-api:latest
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
               ports:
                 - {containerPort: 3000, name: http}
               env:
@@ -280,14 +280,14 @@ items:
         spec:
           initContainers:
             - name: seed-env
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia/analyser-api:latest
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
               command: ["sh", "-c", "cp /seed/.env /runtime/.env && chmod 660 /runtime/.env"]
               volumeMounts:
                 - {name: seed, mountPath: /seed, readOnly: true}
                 - {name: runtime, mountPath: /runtime}
           containers:
             - name: tunel
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia/analyser-api:latest
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-api:latest
               command: ["sh", "-c", "exec uvicorn tunel_app:app --host 0.0.0.0 --port 3001 --log-config logging.json"]
               ports:
                 - {containerPort: 3001, name: http}
@@ -344,7 +344,7 @@ items:
         spec:
           containers:
             - name: web
-              image: image-registry.openshift-image-registry.svc:5000/pf-policia/analyser-web:latest
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/analyser-web:latest
               ports:
                 - {containerPort: 8080, name: http}
               readinessProbe:
