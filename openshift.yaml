@@ -36,7 +36,7 @@ items:
     kind: PersistentVolumeClaim
     metadata:
       name: postgres-data
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       accessModes: ["ReadWriteOnce"]
       resources:
@@ -48,7 +48,7 @@ items:
     metadata:
       # NOME OBRIGATÓRIO: db_utils.DB_HOST é "postgres" (hardcoded, como no compose).
       name: postgres
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       selector: {app: pf-policia, component: postgres}
       ports:
@@ -57,7 +57,7 @@ items:
     kind: Deployment
     metadata:
       name: postgres
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       replicas: 1
       strategy:
@@ -105,7 +105,7 @@ items:
     kind: Service
     metadata:
       name: pgbouncer
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       selector: {app: pf-policia, component: pgbouncer}
       ports:
@@ -114,7 +114,7 @@ items:
     kind: Deployment
     metadata:
       name: pgbouncer
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       replicas: 1
       selector:
@@ -149,7 +149,7 @@ items:
     kind: PersistentVolumeClaim
     metadata:
       name: analyser-data
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       accessModes: ["ReadWriteOnce"]   # para replicas>1 use uma StorageClass ReadWriteMany (NFS/CephFS)
       resources:
@@ -159,7 +159,7 @@ items:
     kind: PersistentVolumeClaim
     metadata:
       name: analyser-logs
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       accessModes: ["ReadWriteOnce"]
       resources:
@@ -169,7 +169,7 @@ items:
     kind: PersistentVolumeClaim
     metadata:
       name: analyser-cache
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       accessModes: ["ReadWriteOnce"]
       resources:
@@ -179,7 +179,7 @@ items:
     kind: Service
     metadata:
       name: api
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       selector: {app: pf-policia, component: api}
       ports:
@@ -188,7 +188,7 @@ items:
     kind: Deployment
     metadata:
       name: api
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       replicas: 1   # suba para 2 com StorageClass ReadWriteMany nos PVCs (estado já vive no banco)
       selector:
@@ -260,7 +260,7 @@ items:
     kind: Service
     metadata:
       name: tunel
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       selector: {app: pf-policia, component: tunel}
       ports:
@@ -269,7 +269,7 @@ items:
     kind: Deployment
     metadata:
       name: tunel
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       replicas: 1
       selector:
@@ -324,7 +324,7 @@ items:
     kind: Service
     metadata:
       name: web
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       selector: {app: pf-policia, component: web}
       ports:
@@ -333,7 +333,7 @@ items:
     kind: Deployment
     metadata:
       name: web
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       replicas: 1
       selector:
@@ -357,7 +357,7 @@ items:
     kind: Route
     metadata:
       name: web
-      labels: {app: pf-policia}
+      labels: {app: pf-policia-dev}
     spec:
       to:
         kind: Service
