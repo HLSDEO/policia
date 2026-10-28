@@ -50,7 +50,7 @@ items:
       name: postgres
       labels: {app: pf-policia-dev}
     spec:
-      selector: {app: pf-policia, component: postgres}
+      selector: {app: pf-policia-dev, component: postgres}
       ports:
         - {name: postgres, port: 5432, targetPort: 5432}
   - apiVersion: apps/v1
@@ -63,10 +63,10 @@ items:
       strategy:
         type: Recreate          # volume RWO: nunca dois pods com o mesmo PGDATA
       selector:
-        matchLabels: {app: pf-policia, component: postgres}
+        matchLabels: {app: pf-policia-dev, component: postgres}
       template:
         metadata:
-          labels: {app: pf-policia, component: postgres}
+          labels: {app: pf-policia-dev, component: postgres}
         spec:
           containers:
             - name: postgres
@@ -107,7 +107,7 @@ items:
       name: pgbouncer
       labels: {app: pf-policia-dev}
     spec:
-      selector: {app: pf-policia, component: pgbouncer}
+      selector: {app: pf-policia-dev, component: pgbouncer}
       ports:
         - {name: pgbounce, port: 6432, targetPort: 6432}
   - apiVersion: apps/v1
@@ -118,10 +118,10 @@ items:
     spec:
       replicas: 1
       selector:
-        matchLabels: {app: pf-policia, component: pgbouncer}
+        matchLabels: {app: pf-policia-dev, component: pgbouncer}
       template:
         metadata:
-          labels: {app: pf-policia, component: pgbouncer}
+          labels: {app: pf-policia-dev, component: pgbouncer}
         spec:
           containers:
             - name: pgbouncer
@@ -181,7 +181,7 @@ items:
       name: api
       labels: {app: pf-policia-dev}
     spec:
-      selector: {app: pf-policia, component: api}
+      selector: {app: pf-policia-dev, component: api}
       ports:
         - {name: http, port: 3000, targetPort: 3000}
   - apiVersion: apps/v1
@@ -192,10 +192,10 @@ items:
     spec:
       replicas: 1   # suba para 2 com StorageClass ReadWriteMany nos PVCs (estado já vive no banco)
       selector:
-        matchLabels: {app: pf-policia, component: api}
+        matchLabels: {app: pf-policia-dev, component: api}
       template:
         metadata:
-          labels: {app: pf-policia, component: api}
+          labels: {app: pf-policia-dev, component: api}
         spec:
           # O .env que a API lê E escreve (env_utils.py) nasce do Secret (read-only) copiado
           # para um emptyDir gravável — o Secret nunca é montado direto no caminho gravável.
@@ -262,7 +262,7 @@ items:
       name: tunel
       labels: {app: pf-policia-dev}
     spec:
-      selector: {app: pf-policia, component: tunel}
+      selector: {app: pf-policia-dev, component: tunel}
       ports:
         - {name: http, port: 3001, targetPort: 3001}
   - apiVersion: apps/v1
@@ -273,10 +273,10 @@ items:
     spec:
       replicas: 1
       selector:
-        matchLabels: {app: pf-policia, component: tunel}
+        matchLabels: {app: pf-policia-dev, component: tunel}
       template:
         metadata:
-          labels: {app: pf-policia, component: tunel}
+          labels: {app: pf-policia-dev, component: tunel}
         spec:
           initContainers:
             - name: seed-env
@@ -326,7 +326,7 @@ items:
       name: web
       labels: {app: pf-policia-dev}
     spec:
-      selector: {app: pf-policia, component: web}
+      selector: {app: pf-policia-dev, component: web}
       ports:
         - {name: http, port: 8080, targetPort: 8080}
   - apiVersion: apps/v1
@@ -337,10 +337,10 @@ items:
     spec:
       replicas: 1
       selector:
-        matchLabels: {app: pf-policia, component: web}
+        matchLabels: {app: pf-policia-dev, component: web}
       template:
         metadata:
-          labels: {app: pf-policia, component: web}
+          labels: {app: pf-policia-dev, component: web}
         spec:
           containers:
             - name: web
