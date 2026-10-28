@@ -96,7 +96,7 @@
   }
 
   // ---------- UF herdada: com unidade superior, quem define a UF é a árvore ----------
-  var UF_AJUDA_PADRAO = "Opcional. Escolha a unidade federativa.";
+  var UF_AJUDA_PADRAO = "Escolha a UF — sem unidade escolhida, a delegacia entra na padrão do estado (SR/PF/<UF>).";
 
   function ufEfetivaDaUnidade(id_unidade) {
     var id = id_unidade, guarda = 0;
@@ -788,11 +788,24 @@
     return nome.toUpperCase();
   }
 
+  // Regra de negócio: nenhuma delegacia fica sem unidade superior. Escolhendo a unidade
+  // resolve; sem escolha, ao menos a UF basta — a API cria/amarra a padrão SR/PF/<UF>
+  // (ex.: SR/PF/ES para a UF ES). Sem os dois, o formulário nem envia.
+  var SEM_UNIDADE_MSG = "Escolha a unidade superior (padrão SR/PF/UF, ex.: SR/PF/ES) ou " +
+                        "informe a UF — nenhuma delegacia pode ficar sem unidade superior.";
+
+  function unidadeConferida($unidade, $uf, $status) {
+    if ($unidade.val() || $.trim($uf.val())) { $status.text(""); return true; }
+    $status.text(SEM_UNIDADE_MSG).addClass("error");
+    return false;
+  }
+
   $formNovo.on("submit", function (e) {
     e.preventDefault();
     $statusNovo.text("").removeClass("success error");
     var nome = nomeValido($("#nova-delegacia-nome"), $statusNovo);
     if (!nome) return;
+    if (!unidadeConferida($("#nova-delegacia-unidade"), $("#nova-delegacia-uf"), $statusNovo)) return;
     $btnNovo.prop("disabled", true);
     $.ajax({
       url: "/api/delegacias",
@@ -825,6 +838,10 @@
     $statusEditar.text("").removeClass("success error");
     var nome = nomeValido($inputEditarNome, $statusEditar);
     if (!nome || !editandoId) return;
+    // legado sem unidade superior: o PUT não pode salvar sem resolver a unidade (a API
+    // amarra a padrão SR/PF/UF — precisa ao menos da UF para isso)
+    if (!(estadoPorId[editandoId] && estadoPorId[editandoId].id_unidade) &&
+        !unidadeConferida($inputEditarUnidade, $inputEditarUf, $statusEditar)) return;
     $btnEditar.prop("disabled", true);
     $.ajax({
       url: "/api/delegacias/" + editandoId,
@@ -837,10 +854,11 @@
           in_ia_ativa: $inputEditarIaAtiva.is(":checked"),
           in_no_ativa: $inputEditarNoAtiva.is(":checked")
         };
-        // PUT não mexe no que não vem: escolher "Sem unidade" precisa do sinal explícito
+        // a unidade não pode ser REMOVIDA (regra: nenhuma delegacia fica sem unidade
+        // superior) — vem a escolha quando o administrador trocou; senão a API mantém a
+        // atual e, se não havia nenhuma, amarra a padrão SR/PF/<UF> do UF informado
         var unidade = $inputEditarUnidade.val();
-        if (unidade) { dado.id_unidade = Number(unidade); }
-        else if (estadoPorId[editandoId] && estadoPorId[editandoId].id_unidade) { dado.limpar_unidade = true; }
+        if (unidade) dado.id_unidade = Number(unidade);
         return dado;
       })())
     })

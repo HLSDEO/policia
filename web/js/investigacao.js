@@ -182,6 +182,8 @@
   var inqueritosTodos = [];
   var extracoesPorInquerito = {};
   var delegaciaAtual = "";
+  // usuário vinculado a uma delegacia não troca de delegacia no seletor (trava na dele)
+  var delegaciaTravada = false;
 
   /* ?inquerito=<id> — deep-link vindo da trilha de navegação das telas do inquérito ("voltar pro
    * inquérito"). Filtra a lista por ele e destaca o card; some depois do primeiro render pra
@@ -5326,6 +5328,14 @@
     $.getJSON("/api/delegacias").done(function (lista) {
       var $sel = $("#investigacao-delegacia-select");
       $sel.find("option:not(:first)").remove();
+      if (delegaciaTravada && delegaciaAtual) {
+        // vinculado a uma delegacia: o filtro mostra só a dela (o backend já recusaria
+        // qualquer outra com 403 — a tela deixa de oferecer o que não funciona)
+        $("<option>").val(delegaciaAtual).text(delegaciaAtual).appendTo($sel);
+        $sel.val(delegaciaAtual).prop("disabled", true)
+          .attr("title", "Seu usuário é vinculado a esta delegacia.");
+        return;
+      }
       // só popula o seletor: ele filtra a pasta de dados, e quem pode usar a IA não sai daqui
       // (vem em ia_ativa, por inquérito/caso — ver iaBloqueada)
       $.each(lista, function (_, d) {
@@ -5352,11 +5362,19 @@
   $.getJSON("/api/auth/eu")
     .done(function (usuario) {
       usuarioLogado = usuario;
-      // Só a escolha explícita salva filtra. Sem isso, a delegacia do usuário logado viraria
-      // filtro padrão e esconderia todo o resto da lista no primeiro acesso.
-      var storageVal = carregarDelegaciaStorage();
-      if (storageVal) {
-        delegaciaAtual = storageVal;
+      if (usuario.id_delegacia && usuario.no_delegacia) {
+        // vinculado: o filtro é sempre a própria delegacia (ninguém troca por aí — o storage
+        // velho de outra delegacia é descartado; o backend recusaria com 403 de qualquer jeito)
+        delegaciaTravada = true;
+        delegaciaAtual = usuario.no_delegacia;
+        try { localStorage.removeItem("analyser-delegacia"); } catch (e) {}
+      } else {
+        // Só a escolha explícita salva filtra. Sem isso, a delegacia do usuário logado viraria
+        // filtro padrão e esconderia todo o resto da lista no primeiro acesso.
+        var storageVal = carregarDelegaciaStorage();
+        if (storageVal) {
+          delegaciaAtual = storageVal;
+        }
       }
       carregarDelegacias();
     })

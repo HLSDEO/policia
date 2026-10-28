@@ -50,6 +50,25 @@ def _conferir_unidade(cur, id_unidade: int | None) -> None:
         raise HTTPException(status_code=400, detail="Unidade superior não encontrada.")
 
 
+# Nenhuma delegacia fica sem unidade superior. Sem escolha explícita no formulário, a
+# unidade vem do padrão institucional SR/PF/<UF> (ex.: SR/PF/ES para a UF ES), criado na hora
+# se ainda não existir (tp_nivel 'uf' — a superintendência do estado).
+SEM_UNIDADE_MSG = ("Nenhuma delegacia pode ficar sem unidade superior. Escolha a unidade "
+                   "(padrão SR/PF/UF — ex.: SR/PF/ES) ou informe a UF para criar a padrão.")
+
+
+def _garantir_unidade_padrao(cur, uf: str | None) -> int | None:
+    """id da unidade SR/PF/<UF> da UF — criando-a se necessário. None se não há UF."""
+    if not uf:
+        return None
+    nome = f"SR/PF/{uf}"
+    cur.execute("INSERT INTO seguranca.unidades (no_unidade, tp_nivel, uf) "
+                "VALUES (%s, 'uf', %s) ON CONFLICT (no_unidade) DO NOTHING", (nome, uf))
+    cur.execute("SELECT id_unidade FROM seguranca.unidades WHERE no_unidade = %s", (nome,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 @router.get("/api/delegacias")
 def listar(analyser_sessao: str | None = Cookie(default=None)):
     """Lista as delegacias disponíveis (usado no cadastro e na edição de usuários).
@@ -84,15 +103,20 @@ def criar(payload: DelegaciaIn):
     with get_connection() as conn:
         with conn.cursor() as cur:
             _conferir_unidade(cur, payload.id_unidade)
+            # sem escolha explícita, amarra na unidade padrão da UF (SR/PF/UF) — criada na hora
+            id_unidade = payload.id_unidade
+            if id_unidade is None:
+                id_unidade = _garantir_unidade_padrao(cur, uf)
+                if id_unidade is None:
+                    raise HTTPException(status_code=400, detail=SEM_UNIDADE_MSG)
             # com unidade superior, a UF é da árvore, não do formulário (docs/unidades_prompts.md)
-            if payload.id_unidade:
-                uf = uf_efetiva_da_unidade(cur, payload.id_unidade) or uf
+            uf = uf_efetiva_da_unidade(cur, id_unidade) or uf
             try:
                 cur.execute(
                     "INSERT INTO seguranca.delegacias (no_delegacia, uf, in_ia_ativa, in_no_ativa, "
                     "id_unidade) VALUES (%s, %s, COALESCE(%s, TRUE), COALESCE(%s, TRUE), %s) "
                     "RETURNING id_delegacia",
-                    (nome, uf, payload.in_ia_ativa, payload.in_no_ativa, payload.id_unidade),
+                    (nome, uf, payload.in_ia_ativa, payload.in_no_ativa, id_unidade),
                 )
                 id_delegacia = cur.fetchone()[0]
             except psycopg_errors.UniqueViolation:
@@ -117,20 +141,28 @@ def atualizar(id_delegacia: int, payload: DelegaciaIn):
             if atual is None:
                 raise HTTPException(status_code=404, detail="Delegacia não encontrada.")
             uf = _uf_bruta(payload.uf) or atual[0]
-            # unidade efetiva depois deste PUT — e com unidade, a UF passa a ser a da árvore
-            unidade_efetiva = None if payload.limpar_unidade else (
-                payload.id_unidade if payload.id_unidade is not None else atual[1]
-            )
-            if unidade_efetiva:
-                uf = uf_efetiva_da_unidade(cur, unidade_efetiva) or uf
+            # unidade efetiva depois deste PUT: ninguém desacopla a delegacia da árvore — no
+            # máximo TROCA de unidade. Sem unidade (legado ou PUT de toggle antigo), entra a
+            # padrão da UF (SR/PF/UF), criada na hora se preciso.
+            if payload.limpar_unidade:
+                raise HTTPException(status_code=400,
+                                    detail="Nenhuma delegacia pode ficar sem unidade superior — "
+                                           "troque de unidade em vez de remover.")
+            unidade_efetiva = payload.id_unidade if payload.id_unidade is not None else atual[1]
+            if unidade_efetiva is None:
+                unidade_efetiva = _garantir_unidade_padrao(cur, uf)
+                if unidade_efetiva is None:
+                    raise HTTPException(status_code=400, detail=SEM_UNIDADE_MSG)
+            # e com unidade, a UF passa a ser a da árvore
+            uf = uf_efetiva_da_unidade(cur, unidade_efetiva) or uf
             cur.execute(
                 "UPDATE seguranca.delegacias SET no_delegacia = %s, "
                 "in_ia_ativa = COALESCE(%s, in_ia_ativa), "
                 "in_no_ativa = COALESCE(%s, in_no_ativa), uf = %s, "
-                "id_unidade = CASE WHEN %s THEN NULL ELSE COALESCE(%s, id_unidade) END "
+                "id_unidade = %s "
                 "WHERE id_delegacia = %s",
                 (nome, payload.in_ia_ativa, payload.in_no_ativa, uf,
-                 payload.limpar_unidade, payload.id_unidade, id_delegacia),
+                 unidade_efetiva, id_delegacia),
             )
         conn.commit()
     return {"ok": True}

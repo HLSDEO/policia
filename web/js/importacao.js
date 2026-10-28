@@ -51,6 +51,11 @@
   var $ipedContaInput = $("#iped-conta-input");
 
   var delegaciaAtual = "";
+  // Usuário vinculado a uma delegacia NÃO troca de delegacia nesta tela — o seletor trava na
+  // dele (a regra de verdade é o delegacia_permitida no backend; aqui a tela deixa de oferecer
+  // o que o servidor ia recusar com 403). Só quem não tem delegacia vincula da (ex.: admin
+  // sem pasta própria) recebe a lista completa.
+  var delegaciaTravada = false;
 
   var $abasExtracao = $(".extracao-tab[data-tab]");
   var $painelsExtracao = $(".extracao-tab-panel");
@@ -1525,6 +1530,13 @@
     return $.getJSON("/api/delegacias").done(function (lista) {
       var $sel = $("#importacao-delegacia-select");
       $sel.find("option:not(:first)").remove();
+      if (delegaciaTravada && delegaciaAtual) {
+        // vinculado: só a própria delegacia no ar, e o select nem abre
+        $sel.append($("<option>").val(delegaciaAtual).text(delegaciaAtual));
+        $sel.val(delegaciaAtual).prop("disabled", true)
+          .attr("title", "Seu usuário é vinculado a esta delegacia — a importação só roda nela.");
+        return;
+      }
       $.each(lista, function (_, d) {
         $sel.append($("<option>").val(d.no_delegacia).text(d.no_delegacia));
       });
@@ -2060,11 +2072,15 @@
 
   $.getJSON("/api/auth/eu")
     .done(function (usuario) {
-      var storageVal = carregarDelegaciaStorage();
-      if (storageVal) {
-        delegaciaAtual = storageVal;
-      } else if (usuario.id_delegacia) {
+      if (usuario.id_delegacia && usuario.no_delegacia) {
+        // vinculado a uma delegacia: ignora o localStorage (um valor velho de outra delegacia
+        // não pode nem aparecer aqui — o backend recusaria com 403 de qualquer forma)
+        delegaciaTravada = true;
         delegaciaAtual = usuario.no_delegacia;
+        try { localStorage.removeItem("analyser-delegacia"); } catch (e) {}
+      } else {
+        var storageVal = carregarDelegaciaStorage();
+        if (storageVal) delegaciaAtual = storageVal;
       }
       carregarDelegacias();
     })

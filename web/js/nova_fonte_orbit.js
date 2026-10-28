@@ -55,7 +55,12 @@
 
   function icone(nome) { return window.Icones ? window.Icones.html(nome) : ""; }
   function delegaciaStorage() { try { return localStorage.getItem("analyser-delegacia") || ""; } catch (e) { return ""; } }
-  function delegaciaAtual() { return contexto.delegacia || delegaciaStorage() || null; }
+  // vinculado a uma delegacia: ela é o padrão do contexto — o storage do seletor não existe
+  // para esse perfil (as telas travam o seletor na própria delegacia)
+  function delegaciaAtual() {
+    return contexto.delegacia || delegaciaStorage() ||
+      (usuarioAtual && usuarioAtual.id_delegacia && usuarioAtual.no_delegacia) || null;
+  }
   function escaparSeletor(valor) { return String(valor || "").replace(/(["\\])/g, "\\$1"); }
 
   function criarModal() {

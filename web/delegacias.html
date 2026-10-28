@@ -103,7 +103,9 @@
             <h2>Unidades superiores</h2>
             <p class="card-hint">Hierarquia acima das delegacias — normalmente a UF, mas estados como o DF
               têm um nível a mais (ex.: DIP e DICOR abaixo da superintendência). A árvore organiza a
-              gerência, define a UF herdada pelas delegacias e a herança de prompts e IA por unidade.</p>
+              gerência, define a UF herdada pelas delegacias e a herança de prompts e IA por unidade.
+              Padrão institucional da superintendência: <strong>SR/PF/&lt;UF&gt;</strong> (ex.: SR/PF/ES,
+              da UF ES) — criada automaticamente quando uma delegacia entra só com a UF.</p>
           </div>
           <button type="button" class="btn btn-primary" id="abrir-nova-unidade-btn">Nova unidade</button>
         </div>
@@ -167,14 +169,16 @@
           <select id="nova-delegacia-uf">
             <option value="">Sem UF</option>
           </select>
-          <p class="field-help" id="nova-delegacia-uf-help">Opcional. Escolha a unidade federativa.</p>
+          <p class="field-help" id="nova-delegacia-uf-help">Escolha a unidade federativa — com ela, a delegacia
+            entra na unidade padrão do estado (SR/PF/&lt;UF&gt;, ex.: SR/PF/ES).</p>
         </div>
         <div class="field">
           <label for="nova-delegacia-unidade">Unidade superior</label>
           <select id="nova-delegacia-unidade">
-            <option value="">Sem unidade</option>
+            <option value="">Usar a UF (padrão SR/PF/&lt;UF&gt;)</option>
           </select>
-          <p class="field-help">Opcional. Pai da delegacia na hierarquia (ex.: a UF, ou DIP/DICOR no DF). Define os prompts de IA que a delegacia herda.</p>
+          <p class="field-help">Obrigatório, direto ou pela UF: pai da delegacia na hierarquia (ex.: a
+            superintendência SR/PF/ES, ou DIP/DICOR no DF). Define os prompts de IA que a delegacia herda.</p>
         </div>
         <div class="field">
           <label class="checkbox-label" for="nova-delegacia-ia-ativa">
@@ -220,9 +224,10 @@
             <div class="field">
               <label for="editar-delegacia-unidade">Unidade superior</label>
               <select id="editar-delegacia-unidade">
-                <option value="">Sem unidade</option>
+                <option value="">Manter a atual</option>
               </select>
-              <p class="field-help">Pai da delegacia na hierarquia. Define os prompts de IA que a delegacia herda.</p>
+              <p class="field-help">Troque se preciso — nenhuma delegacia fica sem unidade superior
+                (padrão SR/PF/&lt;UF&gt;, ex.: SR/PF/ES). Define os prompts de IA que a delegacia herda.</p>
             </div>
             <div class="field">
               <label class="checkbox-label" for="editar-delegacia-ia-ativa">
