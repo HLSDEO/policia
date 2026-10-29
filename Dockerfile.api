@@ -34,8 +34,8 @@ COPY api/rotas ./rotas
 COPY api/tools ./tools
 
 # Ex-bind-mounts read-only do compose → embutidos na imagem (rebuild a cada mudança,
-# como no fluxo de deploy por imagem do OpenShift).
-COPY VERSION /app/VERSION
+# como no fluxo de deploy por imagem do OpenShift). O VERSION saiu: com a esteira PF a
+# versão é a tag da imagem (Jenkins release); versao_utils.py mostra "desconhecida".
 COPY db/migracoes /app/db/migracoes
 COPY db/import /app/db/import
 COPY docs /app/docs
