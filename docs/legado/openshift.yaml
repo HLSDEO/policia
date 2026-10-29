@@ -1,3 +1,8 @@
+# LEGADO (2026-10): este manifesto foi SUBSTITUÍDO pela esteira do ecossistema PF:
+#   - builds:        openshift/build.yaml   (Jenkins build_image)
+#   - api/web/tunel: Helm values em configuracao-ambientes (Jenkins deploy_<ambiente>)
+#   - banco:         openshift/banco.yaml   (ainda manual, até o Postgres gerenciado)
+# Mantido aqui apenas como referência dos ajustes de OpenShift (SCC, PVCs, registry interno).
 # ===================================================================================================================
 # Analyser no OpenShift (Red Hat) — namespace de destino: pf-policia (ajuste labels/namespace se for outro).
 #

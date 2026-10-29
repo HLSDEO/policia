@@ -1,0 +1,15 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: policia-api
+  description: API FastAPI central do PolícIA (busca, IA, auditoria, ingestão)
+  tags:
+    - python
+    - rest
+  annotations:
+    liquibase: 'false'
+spec:
+  type: service
+  lifecycle: production
+  owner: dicor
+  system: policia

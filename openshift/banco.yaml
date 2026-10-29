@@ -1,0 +1,144 @@
+# ===================================================================================================================
+# Postgres + PgBouncer do ecossistema `policia` — DEV, transitório.
+#
+# O chart pf-deployment não roda banco: enquanto o Postgres gerenciado não é provisionado
+# (demanda CITSmart pendente), o banco vive aqui, aplicado manualmente no namespace do
+# ambiente (pf-policia-dev). NUNCA aplicar isto em produção.
+#
+# Nomes fixos: db_utils.DB_HOST = "postgres" (hardcoded) e PGBOUNCER_HOST=pgbouncer vem do
+# Helm values — os Services precisam manter exatamente estes nomes.
+#
+# Segredo: decisão do projeto — SEM Vault por ora; credenciais apenas de DEV inline abaixo.
+# Trocar quando o Postgres gerenciado chegar (e aí sim, via ExternalSecrets).
+#
+# Imagens: construídas pelos BuildConfigs de openshift/build.yaml. O caminho do registry
+# interno usa o namespace ONDE os ImageStreams vivem — ajuste `pf-policia-dev` se o build
+# for para o namespace de builds do ecossistema (pf-build-images).
+# ===================================================================================================================
+apiVersion: v1
+kind: List
+items:
+
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: policia-db
+      labels: {app: policia}
+    type: Opaque
+    stringData:
+      POSTGRES_USER: analyser        # SOMENTE DEV
+      POSTGRES_PASSWORD: analyser    # SOMENTE DEV
+      POSTGRES_DB: analyser
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # Postgres (imagem própria: rhel9/postgresql-16 + hook que aplica db/init no primeiro boot)
+  # ---------------------------------------------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: postgres-data
+      labels: {app: policia}
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+      # storageClassName: <classe-padrao do cluster; omitido = DefaultStorageClass>
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      # NOME OBRIGATÓRIO: db_utils.DB_HOST é "postgres" (hardcoded, como no compose).
+      name: postgres
+      labels: {app: policia}
+    spec:
+      selector: {app: policia, component: postgres}
+      ports:
+        - {name: postgres, port: 5432, targetPort: 5432}
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: postgres
+      labels: {app: policia}
+    spec:
+      replicas: 1
+      strategy:
+        type: Recreate          # volume RWO: nunca dois pods com o mesmo PGDATA
+      selector:
+        matchLabels: {app: policia, component: postgres}
+      template:
+        metadata:
+          labels: {app: policia, component: postgres}
+        spec:
+          containers:
+            - name: postgres
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/policia-postgres:develop
+              ports:
+                - {containerPort: 5432, name: postgres}
+              env:
+                - name: POSTGRESQL_USER
+                  valueFrom: {secretKeyRef: {name: policia-db, key: POSTGRES_USER}}
+                - name: POSTGRESQL_PASSWORD
+                  valueFrom: {secretKeyRef: {name: policia-db, key: POSTGRES_PASSWORD}}
+                - name: POSTGRESQL_DATABASE
+                  valueFrom: {secretKeyRef: {name: policia-db, key: POSTGRES_DB}}
+                # Deixe folga para o PgBouncer + conexões longas da API (mesma regra do compose).
+                - name: POSTGRESQL_MAX_CONNECTIONS
+                  value: "200"
+              volumeMounts:
+                - {name: data, mountPath: /var/lib/pgsql/data}
+              readinessProbe:
+                exec:
+                  command: ["sh", "-c", "pg_isready -q"]
+                initialDelaySeconds: 10
+                periodSeconds: 5
+              resources:
+                requests: {cpu: 500m, memory: 1Gi}
+                limits: {memory: 4Gi}
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: postgres-data
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # PgBouncer (pooler session-mode; sem Route — só a rede interna do cluster alcança)
+  # ---------------------------------------------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: pgbouncer
+      labels: {app: policia}
+    spec:
+      selector: {app: policia, component: pgbouncer}
+      ports:
+        - {name: pgbounce, port: 6432, targetPort: 6432}
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: pgbouncer
+      labels: {app: policia}
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: {app: policia, component: pgbouncer}
+      template:
+        metadata:
+          labels: {app: policia, component: pgbouncer}
+        spec:
+          containers:
+            - name: pgbouncer
+              image: image-registry.openshift-image-registry.svc:5000/pf-policia-dev/policia-pgbouncer:develop
+              ports:
+                - {containerPort: 6432, name: pgbounce}
+              env:
+                - name: POSTGRES_USER
+                  valueFrom: {secretKeyRef: {name: policia-db, key: POSTGRES_USER}}
+                - name: POSTGRES_PASSWORD
+                  valueFrom: {secretKeyRef: {name: policia-db, key: POSTGRES_PASSWORD}}
+                - name: POSTGRES_DB
+                  valueFrom: {secretKeyRef: {name: policia-db, key: POSTGRES_DB}}
+                - name: PGBOUNCE_POOL_SIZE
+                  value: "60"
+              readinessProbe:
+                tcpSocket: {port: 6432}
+                initialDelaySeconds: 5
+                periodSeconds: 10

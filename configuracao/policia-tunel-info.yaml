@@ -1,0 +1,15 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: policia-tunel
+  description: Relay WebSocket NAT central<->nós de delegacia (processo único, nunca escalar)
+  tags:
+    - python
+    - websocket
+  annotations:
+    liquibase: 'false'
+spec:
+  type: service
+  lifecycle: production
+  owner: dicor
+  system: policia

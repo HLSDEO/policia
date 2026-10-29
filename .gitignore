@@ -23,3 +23,7 @@
 # Segredo do deploy OpenShift (copia preenchida do env.openshift.example) e cache de teste.
 openshift.env.local
 .pytest_cache/
+
+# Nunca commitar segredos: o antigo secrets.yaml foi removido do repositorio (padrao PF —
+# segredos vao no Helm values apenas em DEV; Vault para hom/prod).
+secrets.yaml

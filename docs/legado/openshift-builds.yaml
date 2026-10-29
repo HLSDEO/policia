@@ -1,3 +1,6 @@
+# LEGADO (2026-10): substituído por openshift/build.yaml (nomes policia-*, tags por versão,
+# aplicado pelo Jenkins build_image do ecossistema). Mantido como referência de resources/
+# completionDeadline dos builds.
 # ===================================================================================================================
 # Builds no cluster (OpenShift) — 4 imagens a partir DESTE repositório Git, uma por Dockerfile.
 #

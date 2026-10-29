@@ -63,6 +63,13 @@ def health(resposta: Response):
         return {"ok": False, "banco": "indisponivel", "pool": estatisticas}
 
 
+@router.get("/health")
+def health_openshift(resposta: Response):
+    """Alias de /api/health no caminho /health — padrão dos probes do guia OpenShift PF
+    (liveness/readiness no Helm values apontam para cá). Mesmo comportamento, mesmos códigos."""
+    return health(resposta)
+
+
 @router.get("/api/sistema/versao", dependencies=[Depends(exigir_aprovado)])
 def versao():
     """Versão instalada (arquivo VERSION) — para o rodapé e para suporte. Não toca na rede."""

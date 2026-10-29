@@ -1,0 +1,231 @@
+# ===================================================================================================================
+# BuildConfig + ImageStream do ecossistema `policia` — padrão "Python — Serviço no OpenShift (PF)".
+#
+# Este é o arquivo que o Jenkins (job <sistema>/<servico>/build_image, template
+# ecossistema_backstage/Jenkinsfile_build_image) aplica no namespace de builds (pf-build-images).
+# O job substitui:
+#   - `ref: valor-alterado-pelo-job-build` pela branch/tag em build;
+#   - a tag de saída `develop` pela `TARGET_VERSION` do job.
+#
+# Estratégia: **Docker** (não S2I) — exceção documentada: a API precisa de binários de sistema
+# (postgresql-client para scripts de import, ffmpeg para miniaturas) que o `pf-python-311` S2I
+# não instala. Um BuildConfig por imagem; o repositório é multisserviço (api, tunel, web,
+# postgres, pgbouncer) — decisão validada com a arquitetura para este ecossistema.
+#
+# O repositório Git é PÚBLICO (GitHub) — sem sourceSecret. Se ficar privado:
+#   oc create secret generic git-pf --type=kubernetes.io/basic-auth \
+#     --from-literal=username=<usuario> --from-literal=password=<token-PAT>
+# e descomente `sourceSecret` em cada BuildConfig.
+# ===================================================================================================================
+apiVersion: v1
+kind: List
+items:
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # policia-api — API FastAPI (Dockerfile.api). Build leve: modelos de IA vivem no nó da
+  # delegacia (docs/no_descentralizado.md); sem torch/transformers na imagem central.
+  # ---------------------------------------------------------------------------------------------------------------
+  - kind: ImageStream
+    apiVersion: image.openshift.io/v1
+    metadata:
+      name: policia-api
+      annotations:
+        application: policia
+  - kind: BuildConfig
+    apiVersion: build.openshift.io/v1
+    metadata:
+      name: policia-api
+      annotations:
+        application: policia
+    spec:
+      output:
+        to:
+          kind: ImageStreamTag
+          name: 'policia-api:develop'
+      strategy:
+        type: Docker
+        dockerStrategy:
+          dockerfilePath: Dockerfile.api
+          imageOptimizationPolicy: SkipLayers   # nada roda no build além de pip/apt
+          resources:
+            requests: {cpu: "1", memory: 2Gi}
+            limits: {cpu: "4", memory: 8Gi}
+      source:
+        type: Git
+        git:
+          uri: 'https://github.com/HLSDEO/policia.git'
+          ref: valor-alterado-pelo-job-build
+        # sourceSecret:
+        #   name: git-pf
+      runPolicy: Serial
+      completionDeadlineSeconds: 5400
+      failedBuildsHistoryLimit: 2
+      successfulBuildsHistoryLimit: 2
+      triggers: []
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # policia-tunel — relay WebSocket central<->nós. MESMA imagem/Dockerfile da API (o Deployment
+  # só troca o command para tunel_app:app). ImageStream próprio porque o pipeline do ecossistema
+  # resolve a imagem por nome de serviço (`<servico>:<versao>`).
+  # ---------------------------------------------------------------------------------------------------------------
+  - kind: ImageStream
+    apiVersion: image.openshift.io/v1
+    metadata:
+      name: policia-tunel
+      annotations:
+        application: policia
+  - kind: BuildConfig
+    apiVersion: build.openshift.io/v1
+    metadata:
+      name: policia-tunel
+      annotations:
+        application: policia
+    spec:
+      output:
+        to:
+          kind: ImageStreamTag
+          name: 'policia-tunel:develop'
+      strategy:
+        type: Docker
+        dockerStrategy:
+          dockerfilePath: Dockerfile.api
+          imageOptimizationPolicy: SkipLayers
+          resources:
+            requests: {cpu: 250m, memory: 1Gi}
+            limits: {cpu: "2", memory: 4Gi}
+      source:
+        type: Git
+        git:
+          uri: 'https://github.com/HLSDEO/policia.git'
+          ref: valor-alterado-pelo-job-build
+        # sourceSecret:
+        #   name: git-pf
+      runPolicy: Serial
+      completionDeadlineSeconds: 5400
+      failedBuildsHistoryLimit: 2
+      successfulBuildsHistoryLimit: 2
+      triggers: []
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # policia-web — front estático + nginx (Dockerfile.web, nginx-unprivileged :8080).
+  # ---------------------------------------------------------------------------------------------------------------
+  - kind: ImageStream
+    apiVersion: image.openshift.io/v1
+    metadata:
+      name: policia-web
+      annotations:
+        application: policia
+  - kind: BuildConfig
+    apiVersion: build.openshift.io/v1
+    metadata:
+      name: policia-web
+      annotations:
+        application: policia
+    spec:
+      output:
+        to:
+          kind: ImageStreamTag
+          name: 'policia-web:develop'
+      strategy:
+        type: Docker
+        dockerStrategy:
+          dockerfilePath: Dockerfile.web
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+      source:
+        type: Git
+        git:
+          uri: 'https://github.com/HLSDEO/policia.git'
+          ref: valor-alterado-pelo-job-build
+        # sourceSecret:
+        #   name: git-pf
+      runPolicy: Serial
+      completionDeadlineSeconds: 1800
+      failedBuildsHistoryLimit: 2
+      successfulBuildsHistoryLimit: 2
+      triggers: []
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # policia-postgres — banco (Dockerfile.postgres). Transitório: enquanto o Postgres gerenciado
+  # não vem, o Deployment fica em openshift/banco.yaml (fora do Helm pf-deployment).
+  # ---------------------------------------------------------------------------------------------------------------
+  - kind: ImageStream
+    apiVersion: image.openshift.io/v1
+    metadata:
+      name: policia-postgres
+      annotations:
+        application: policia
+  - kind: BuildConfig
+    apiVersion: build.openshift.io/v1
+    metadata:
+      name: policia-postgres
+      annotations:
+        application: policia
+    spec:
+      output:
+        to:
+          kind: ImageStreamTag
+          name: 'policia-postgres:develop'
+      strategy:
+        type: Docker
+        dockerStrategy:
+          dockerfilePath: Dockerfile.postgres
+          # buildArgs:                      # cluster sem entitlement registry.redhat.io:
+          #   - name: POSTGRES_BASE         #   usa a imagem comunitária sclorg
+          #     value: quay.io/sclorg/postgresql-16-c9s
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+      source:
+        type: Git
+        git:
+          uri: 'https://github.com/HLSDEO/policia.git'
+          ref: valor-alterado-pelo-job-build
+        # sourceSecret:
+        #   name: git-pf
+      runPolicy: Serial
+      completionDeadlineSeconds: 1800
+      failedBuildsHistoryLimit: 2
+      successfulBuildsHistoryLimit: 2
+      triggers: []
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # policia-pgbouncer — pooler de conexão (Dockerfile.pgbouncer). Mesmo contexto do banco.
+  # ---------------------------------------------------------------------------------------------------------------
+  - kind: ImageStream
+    apiVersion: image.openshift.io/v1
+    metadata:
+      name: policia-pgbouncer
+      annotations:
+        application: policia
+  - kind: BuildConfig
+    apiVersion: build.openshift.io/v1
+    metadata:
+      name: policia-pgbouncer
+      annotations:
+        application: policia
+    spec:
+      output:
+        to:
+          kind: ImageStreamTag
+          name: 'policia-pgbouncer:develop'
+      strategy:
+        type: Docker
+        dockerStrategy:
+          dockerfilePath: Dockerfile.pgbouncer
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "1", memory: 1Gi}
+      source:
+        type: Git
+        git:
+          uri: 'https://github.com/HLSDEO/policia.git'
+          ref: valor-alterado-pelo-job-build
+        # sourceSecret:
+        #   name: git-pf
+      runPolicy: Serial
+      completionDeadlineSeconds: 1200
+      failedBuildsHistoryLimit: 2
+      successfulBuildsHistoryLimit: 2
+      triggers: []

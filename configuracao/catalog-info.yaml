@@ -1,0 +1,22 @@
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: policia
+  description: PolícIA - análise de evidências digitais (central + nós de delegacia)
+  tags:
+    - python
+    - fastapi
+spec:
+  lifecycle: production
+  owner: dicor    # TODO: confirmar unidade dona com a arquitetura (SAS)
+---
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: policia-components
+  description: Componentes do ecossistema policia
+spec:
+  targets:
+    - ./policia-api-info.yaml
+    - ./policia-web-info.yaml
+    - ./policia-tunel-info.yaml

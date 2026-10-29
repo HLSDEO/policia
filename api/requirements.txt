@@ -1,5 +1,8 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
+# runner padrão do guia OpenShift PF (gunicorn + worker ASGI do uvicorn) — ver o `command:`
+# do Helm values do policia-api em configuracao-ambientes.
+gunicorn==23.0.0
 psycopg[binary]==3.2.3
 psycopg-pool==3.2.3
 requests==2.32.3
